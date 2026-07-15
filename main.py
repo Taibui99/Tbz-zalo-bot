@@ -266,11 +266,11 @@ def on_startup():
     thread.start()
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
-    """Endpoint để dịch vụ ping (UptimeRobot, v.v.) giữ cho Render free tier không ngủ."""
+    """Endpoint để dịch vụ ping (UptimeRobot, v.v.) giữ cho Render free tier không ngủ.
+    Hỗ trợ cả GET và HEAD vì nhiều dịch vụ uptime-monitor mặc định gửi HEAD."""
     return {"status": "ok"}
-
 
 @app.get("/api/status")
 def api_status():
