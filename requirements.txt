@@ -1,0 +1,5 @@
+python-zalo-bot
+google-genai
+requests
+fastapi
+uvicorn
