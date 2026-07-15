@@ -40,13 +40,22 @@ SYSTEM_INSTRUCTION = (
 log_lines: deque[str] = deque(maxlen=300)
 log_lock = threading.Lock()
 
+conversations: deque[dict] = deque(maxlen=100)
+conv_lock = threading.Lock()
+
 stats = {
     "started_at": time.time(),
     "message_count": 0,
+    "text_count": 0,
+    "photo_count": 0,
+    "error_count": 0,
     "last_message_at": None,
     "bot_running": False,
     "bot_error": None,
 }
+unique_users: set = set()
+response_times: deque[float] = deque(maxlen=50)
+stats_lock = threading.Lock()
 
 
 def log(message: str):
@@ -55,6 +64,22 @@ def log(message: str):
     print(line, flush=True)
     with log_lock:
         log_lines.append(line)
+
+
+def record_conversation(chat_id: str, msg_type: str, user_text: str, bot_reply: str, duration: float):
+    """Lưu 1 cặp hỏi-đáp để hiện lên tab Hội thoại trên dashboard."""
+    with conv_lock:
+        conversations.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "chat_id": chat_id,
+            "type": msg_type,
+            "user_text": user_text,
+            "bot_reply": bot_reply,
+            "duration": round(duration, 1),
+        })
+    with stats_lock:
+        unique_users.add(chat_id)
+        response_times.append(duration)
 
 
 # ============================================================
@@ -95,6 +120,7 @@ def call_gemini(chat_id: str, parts: list) -> str:
         response = session.send_message(parts)
         return response.text or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
     except errors.ClientError as e:
+        stats["error_count"] += 1
         if e.code == 429:
             log(f"⚠️  Gemini rate limit (429): {e}")
             return (
@@ -104,6 +130,7 @@ def call_gemini(chat_id: str, parts: list) -> str:
         log(f"⚠️  Lỗi Gemini (ClientError): {e}")
         return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé."
     except Exception as e:
+        stats["error_count"] += 1
         log(f"⚠️  Lỗi gọi Gemini: {e}")
         return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé."
 
@@ -136,20 +163,26 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     text = update.message.text
+    t0 = time.monotonic()
     stats["message_count"] += 1
+    stats["text_count"] += 1
     stats["last_message_at"] = time.time()
     log(f"📩 Nhận tin nhắn từ {chat_id}: {text!r}")
 
     reply_text = call_gemini(chat_id, [text])
     await send_long_reply(update, reply_text)
-    log(f"✅ Đã trả lời {chat_id}")
+    duration = time.monotonic() - t0
+    record_conversation(chat_id, "text", text, reply_text, duration)
+    log(f"✅ Đã trả lời {chat_id} (mất {duration:.1f}s)")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     photo_url = update.message.photo_url
     caption = (update.message.text or "").strip()
+    t0 = time.monotonic()
     stats["message_count"] += 1
+    stats["photo_count"] += 1
     stats["last_message_at"] = time.time()
     log(f"🖼️  Nhận ảnh từ {chat_id}")
 
@@ -161,6 +194,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not content_type.startswith("image/"):
             content_type = "image/jpeg"
     except requests.exceptions.RequestException as e:
+        stats["error_count"] += 1
         log(f"⚠️  Lỗi tải ảnh: {e}")
         await update.message.reply_text("Mình không tải được ảnh bro gửi, thử gửi lại nhé.")
         return
@@ -170,7 +204,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_text = call_gemini(chat_id, [image_part, prompt])
     await send_long_reply(update, reply_text)
-    log(f"✅ Đã trả lời ảnh cho {chat_id}")
+    duration = time.monotonic() - t0
+    record_conversation(chat_id, "photo", caption or "[gửi 1 ảnh]", reply_text, duration)
+    log(f"✅ Đã trả lời ảnh cho {chat_id} (mất {duration:.1f}s)")
 
 
 # ============================================================
@@ -220,13 +256,27 @@ def health():
 @app.get("/api/status")
 def api_status():
     uptime_seconds = int(time.time() - stats["started_at"])
+    with stats_lock:
+        unique_user_count = len(unique_users)
+        avg_response = round(sum(response_times) / len(response_times), 1) if response_times else 0
     return {
         "bot_running": stats["bot_running"],
         "bot_error": stats["bot_error"],
         "message_count": stats["message_count"],
+        "text_count": stats["text_count"],
+        "photo_count": stats["photo_count"],
+        "error_count": stats["error_count"],
+        "unique_users": unique_user_count,
+        "avg_response_seconds": avg_response,
         "last_message_at": stats["last_message_at"],
         "uptime_seconds": uptime_seconds,
     }
+
+
+@app.get("/api/conversations")
+def api_conversations():
+    with conv_lock:
+        return {"conversations": list(reversed(conversations))}
 
 
 @app.get("/api/logs/stream")
@@ -258,14 +308,27 @@ def dashboard():
 <style>
   body { font-family: -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }
   h1 { font-size: 20px; }
-  .cards { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
-  .card { background: #1e293b; border-radius: 12px; padding: 16px 20px; min-width: 140px; }
+  .cards { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+  .card { background: #1e293b; border-radius: 12px; padding: 14px 18px; min-width: 120px; }
   .card .label { font-size: 12px; color: #94a3b8; }
-  .card .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+  .card .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
   .ok { color: #4ade80; }
   .err { color: #f87171; }
-  #logs { background: #000; border-radius: 12px; padding: 16px; height: 60vh; overflow-y: auto;
+  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+  .tab-btn { background: #1e293b; border: none; color: #94a3b8; padding: 8px 16px;
+             border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .tab-btn.active { background: #3b82f6; color: white; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  #logs { background: #000; border-radius: 12px; padding: 16px; height: 55vh; overflow-y: auto;
           font-family: monospace; font-size: 13px; white-space: pre-wrap; }
+  #conversations { height: 55vh; overflow-y: auto; }
+  .conv-item { background: #1e293b; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+  .conv-meta { font-size: 11px; color: #64748b; margin-bottom: 6px; }
+  .conv-user { color: #93c5fd; margin-bottom: 6px; }
+  .conv-bot { color: #d1d5db; white-space: pre-wrap; }
+  .badge { display: inline-block; background: #334155; border-radius: 6px; padding: 1px 6px;
+           font-size: 10px; margin-left: 6px; }
 </style>
 </head>
 <body>
@@ -274,10 +337,32 @@ def dashboard():
     <div class="card"><div class="label">Trạng thái</div><div class="value" id="status">...</div></div>
     <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">...</div></div>
     <div class="card"><div class="label">Tổng tin nhắn</div><div class="value" id="count">...</div></div>
+    <div class="card"><div class="label">Người dùng</div><div class="value" id="users">...</div></div>
+    <div class="card"><div class="label">Text / Ảnh</div><div class="value" id="breakdown">...</div></div>
+    <div class="card"><div class="label">Phản hồi TB</div><div class="value" id="avgtime">...</div></div>
+    <div class="card"><div class="label">Lỗi</div><div class="value" id="errors">...</div></div>
   </div>
-  <div id="logs"></div>
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-conv-btn" onclick="showTab('conv')">💬 Hội thoại</button>
+    <button class="tab-btn" id="tab-log-btn" onclick="showTab('log')">📜 Log hệ thống</button>
+  </div>
+
+  <div class="panel active" id="panel-conv">
+    <div id="conversations"></div>
+  </div>
+  <div class="panel" id="panel-log">
+    <div id="logs"></div>
+  </div>
 
 <script>
+function showTab(name) {
+  document.getElementById('panel-conv').className = 'panel' + (name === 'conv' ? ' active' : '');
+  document.getElementById('panel-log').className = 'panel' + (name === 'log' ? ' active' : '');
+  document.getElementById('tab-conv-btn').className = 'tab-btn' + (name === 'conv' ? ' active' : '');
+  document.getElementById('tab-log-btn').className = 'tab-btn' + (name === 'log' ? ' active' : '');
+}
+
 async function refreshStatus() {
   const res = await fetch('/api/status');
   const data = await res.json();
@@ -285,12 +370,44 @@ async function refreshStatus() {
   statusEl.textContent = data.bot_running ? 'Đang chạy' : 'Lỗi / chưa chạy';
   statusEl.className = 'value ' + (data.bot_running ? 'ok' : 'err');
   document.getElementById('count').textContent = data.message_count;
+  document.getElementById('users').textContent = data.unique_users;
+  document.getElementById('breakdown').textContent = `${data.text_count} / ${data.photo_count}`;
+  document.getElementById('avgtime').textContent = data.avg_response_seconds + 's';
+  const errEl = document.getElementById('errors');
+  errEl.textContent = data.error_count;
+  errEl.className = 'value ' + (data.error_count > 0 ? 'err' : '');
   const h = Math.floor(data.uptime_seconds / 3600);
   const m = Math.floor((data.uptime_seconds % 3600) / 60);
   document.getElementById('uptime').textContent = `${h}h ${m}m`;
 }
+
+async function refreshConversations() {
+  const res = await fetch('/api/conversations');
+  const data = await res.json();
+  const el = document.getElementById('conversations');
+  if (data.conversations.length === 0) {
+    el.innerHTML = '<div style="color:#64748b">Chưa có hội thoại nào.</div>';
+    return;
+  }
+  el.innerHTML = data.conversations.map(c => `
+    <div class="conv-item">
+      <div class="conv-meta">${c.time} · ${c.chat_id}<span class="badge">${c.type === 'photo' ? '🖼️ ảnh' : '💬 text'}</span><span class="badge">${c.duration}s</span></div>
+      <div class="conv-user">👤 ${escapeHtml(c.user_text)}</div>
+      <div class="conv-bot">🤖 ${escapeHtml(c.bot_reply)}</div>
+    </div>
+  `).join('');
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 refreshStatus();
+refreshConversations();
 setInterval(refreshStatus, 5000);
+setInterval(refreshConversations, 5000);
 
 const logsEl = document.getElementById('logs');
 const evtSource = new EventSource('/api/logs/stream');
