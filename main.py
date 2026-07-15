@@ -66,15 +66,28 @@ def log(message: str):
         log_lines.append(line)
 
 
-def record_conversation(chat_id: str, msg_type: str, user_text: str, bot_reply: str, duration: float):
-    """Lưu 1 cặp hỏi-đáp để hiện lên tab Hội thoại trên dashboard."""
+def record_conversation(
+    chat_id: str,
+    display_name: str,
+    msg_type: str,
+    user_text: str,
+    bot_reply: str,
+    sent_at: "datetime | None",
+    received_at: datetime,
+    responded_at: datetime,
+):
+    """Lưu 1 cặp hỏi-đáp đầy đủ mốc thời gian để hiện lên tab Hội thoại trên dashboard."""
+    duration = (responded_at - received_at).total_seconds()
     with conv_lock:
         conversations.append({
-            "time": datetime.now().strftime("%H:%M:%S"),
+            "display_name": display_name,
             "chat_id": chat_id,
             "type": msg_type,
             "user_text": user_text,
             "bot_reply": bot_reply,
+            "sent_at": sent_at.strftime("%H:%M:%S") if sent_at else "?",
+            "received_at": received_at.strftime("%H:%M:%S"),
+            "responded_at": responded_at.strftime("%H:%M:%S"),
             "duration": round(duration, 1),
         })
     with stats_lock:
@@ -163,28 +176,32 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     text = update.message.text
-    t0 = time.monotonic()
+    display_name = update.effective_user.display_name if update.effective_user else str(chat_id)
+    sent_at = update.message.date
+    received_at = datetime.now()
     stats["message_count"] += 1
     stats["text_count"] += 1
     stats["last_message_at"] = time.time()
-    log(f"📩 Nhận tin nhắn từ {chat_id}: {text!r}")
+    log(f"📩 Nhận tin nhắn từ {display_name} ({chat_id}): {text!r}")
 
     reply_text = call_gemini(chat_id, [text])
     await send_long_reply(update, reply_text)
-    duration = time.monotonic() - t0
-    record_conversation(chat_id, "text", text, reply_text, duration)
-    log(f"✅ Đã trả lời {chat_id} (mất {duration:.1f}s)")
+    responded_at = datetime.now()
+    record_conversation(chat_id, display_name, "text", text, reply_text, sent_at, received_at, responded_at)
+    log(f"✅ Đã trả lời {display_name} (mất {(responded_at - received_at).total_seconds():.1f}s)")
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     photo_url = update.message.photo_url
     caption = (update.message.text or "").strip()
-    t0 = time.monotonic()
+    display_name = update.effective_user.display_name if update.effective_user else str(chat_id)
+    sent_at = update.message.date
+    received_at = datetime.now()
     stats["message_count"] += 1
     stats["photo_count"] += 1
     stats["last_message_at"] = time.time()
-    log(f"🖼️  Nhận ảnh từ {chat_id}")
+    log(f"🖼️  Nhận ảnh từ {display_name} ({chat_id})")
 
     try:
         img_resp = requests.get(photo_url, timeout=20)
@@ -204,9 +221,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_text = call_gemini(chat_id, [image_part, prompt])
     await send_long_reply(update, reply_text)
-    duration = time.monotonic() - t0
-    record_conversation(chat_id, "photo", caption or "[gửi 1 ảnh]", reply_text, duration)
-    log(f"✅ Đã trả lời ảnh cho {chat_id} (mất {duration:.1f}s)")
+    responded_at = datetime.now()
+    record_conversation(
+        chat_id, display_name, "photo", caption or "[gửi 1 ảnh]", reply_text, sent_at, received_at, responded_at
+    )
+    log(f"✅ Đã trả lời ảnh cho {display_name} (mất {(responded_at - received_at).total_seconds():.1f}s)")
 
 
 # ============================================================
@@ -391,7 +410,14 @@ async function refreshConversations() {
   }
   el.innerHTML = data.conversations.map(c => `
     <div class="conv-item">
-      <div class="conv-meta">${c.time} · ${c.chat_id}<span class="badge">${c.type === 'photo' ? '🖼️ ảnh' : '💬 text'}</span><span class="badge">${c.duration}s</span></div>
+      <div class="conv-meta">
+        <strong>${escapeHtml(c.display_name)}</strong> (${c.chat_id})
+        <span class="badge">${c.type === 'photo' ? '🖼️ ảnh' : '💬 text'}</span>
+      </div>
+      <div class="conv-meta">
+        Gửi lúc ${c.sent_at} · Bot nhận lúc ${c.received_at} · Bot trả lời lúc ${c.responded_at}
+        <span class="badge">${c.duration}s</span>
+      </div>
       <div class="conv-user">👤 ${escapeHtml(c.user_text)}</div>
       <div class="conv-bot">🤖 ${escapeHtml(c.bot_reply)}</div>
     </div>
