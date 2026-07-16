@@ -294,7 +294,6 @@ def health():
     Hỗ trợ cả GET và HEAD vì nhiều dịch vụ uptime-monitor mặc định gửi HEAD."""
     return {"status": "ok"}
 
-
 @app.get("/api/status")
 def api_status():
     uptime_seconds = int(time.time() - stats["started_at"])
