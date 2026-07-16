@@ -28,7 +28,7 @@ from zalo_bot.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 # ============================================================
 BOT_TOKEN = os.environ.get("ZALO_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 SYSTEM_INSTRUCTION = (
     "Bạn là trợ lý AI thân thiện, trả lời bằng tiếng Việt, ngắn gọn và dễ hiểu."
@@ -148,6 +148,28 @@ def call_gemini(chat_id: str, parts: list) -> str:
         return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé."
 
 
+async def keep_typing(bot, chat_id: str, interval: float = 4.0):
+    """Gửi hiệu ứng 'đang gõ...' lặp lại mỗi vài giây trong lúc chờ Gemini trả lời
+    (hiệu ứng chỉ giữ được ~5s mỗi lần nên cần gửi lại liên tục)."""
+    try:
+        while True:
+            await bot.send_chat_action(chat_id, "typing")
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        pass
+
+
+async def call_gemini_with_typing(bot, chat_id: str, parts: list) -> str:
+    """Chạy call_gemini() (hàm đồng bộ/blocking) trong 1 thread riêng, song song
+    với việc gửi hiệu ứng 'đang gõ...' liên tục - để vòng lặp async không bị đứng."""
+    typing_task = asyncio.create_task(keep_typing(bot, chat_id))
+    try:
+        reply_text = await asyncio.to_thread(call_gemini, chat_id, parts)
+    finally:
+        typing_task.cancel()
+    return reply_text
+
+
 # ============================================================
 # HANDLERS ZALO BOT
 # ============================================================
@@ -184,7 +206,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats["last_message_at"] = time.time()
     log(f"📩 Nhận tin nhắn từ {display_name} ({chat_id}): {text!r}")
 
-    reply_text = call_gemini(chat_id, [text])
+    reply_text = await call_gemini_with_typing(update.get_bot(), chat_id, [text])
     await send_long_reply(update, reply_text)
     responded_at = datetime.now()
     record_conversation(chat_id, display_name, "text", text, reply_text, sent_at, received_at, responded_at)
@@ -219,7 +241,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=content_type)
     prompt = caption if caption else "Mô tả và phân tích nội dung trong ảnh này giúp mình."
 
-    reply_text = call_gemini(chat_id, [image_part, prompt])
+    reply_text = await call_gemini_with_typing(update.get_bot(), chat_id, [image_part, prompt])
     await send_long_reply(update, reply_text)
     responded_at = datetime.now()
     record_conversation(
@@ -266,9 +288,10 @@ def on_startup():
     thread.start()
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
-    """Endpoint để dịch vụ ping (UptimeRobot, v.v.) giữ cho Render free tier không ngủ."""
+    """Endpoint để dịch vụ ping (UptimeRobot, v.v.) giữ cho Render free tier không ngủ.
+    Hỗ trợ cả GET và HEAD vì nhiều dịch vụ uptime-monitor mặc định gửi HEAD."""
     return {"status": "ok"}
 
 
