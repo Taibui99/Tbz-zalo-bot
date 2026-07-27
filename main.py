@@ -13,6 +13,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 from fastapi import FastAPI
@@ -23,6 +24,14 @@ from google.genai import errors, types
 from zalo_bot import Update
 from zalo_bot.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
+VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+
+
+def vn_now() -> datetime:
+    """Giờ Việt Nam thật - server (Render) chạy giờ UTC nên không thể dùng
+    datetime.now() suông, phải gắn rõ múi giờ, nếu không sẽ lệch 7 tiếng."""
+    return datetime.now(VN_TZ)
+
 # ============================================================
 # CẤU HÌNH — lấy từ biến môi trường (set trong Render dashboard)
 # ============================================================
@@ -31,16 +40,22 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 SYSTEM_INSTRUCTION = (
-    "Bạn là trợ lý AI, và là một thằng bạn thân của tôi. Xưng hô 'bro' hay vân vân ... có thể quen thuộc khi trò chuyện với tôi. Nói chuyện như 1 thằng con trai. Trả lời bằng Tiếng Việt. Không cần quá lịch sự, có thể cục súc và thô lổ nhưng vẫn đúng trọng tâm cuộc trò chuyện."
+    "Bạn là trợ lý AI thân với người dùng như 1 người bạn thật sự, trả lời bằng tiếng Việt, chính xác và không dài dòng. "
+    "Mỗi tin nhắn người dùng gửi đều có kèm 1 dòng '[Bối cảnh hệ thống: Bây giờ là...]' "
+    "ghi rõ thời điểm thực tế tin đó được gửi - đây không phải nội dung người dùng "
+    "gõ, chỉ là thông tin nền. Hãy để ý các mốc thời gian này xuyên suốt lịch sử "
+    "trò chuyện: nếu người dùng hỏi về thời gian đã trôi qua giữa các lần nhắn "
+    "trước đó (vd 'lúc nãy tôi hỏi gì', 'cách đây bao lâu', 'hôm qua mình nói gì'), "
+    "hãy so sánh các mốc thời gian đó để trả lời chính xác, đừng đoán mò."
 )
 
 # ============================================================
 # TRẠNG THÁI DÙNG CHUNG (đọc/ghi từ cả 2 thread) — dùng deque + lock cho an toàn
 # ============================================================
-log_lines: deque[str] = deque(maxlen=300)
+log_lines: deque = deque(maxlen=300)
 log_lock = threading.Lock()
 
-conversations: deque[dict] = deque(maxlen=100)
+conversations: deque = deque(maxlen=100)
 conv_lock = threading.Lock()
 
 stats = {
@@ -54,29 +69,18 @@ stats = {
     "bot_error": None,
 }
 unique_users: set = set()
-response_times: deque[float] = deque(maxlen=50)
+response_times: deque = deque(maxlen=50)
 stats_lock = threading.Lock()
 
 
 def log(message: str):
-    """Ghi 1 dòng log - vừa in ra console (Render Logs) vừa lưu để hiện lên dashboard."""
-    line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
+    line = f"[{vn_now().strftime('%H:%M:%S')}] {message}"
     print(line, flush=True)
     with log_lock:
         log_lines.append(line)
 
 
-def record_conversation(
-    chat_id: str,
-    display_name: str,
-    msg_type: str,
-    user_text: str,
-    bot_reply: str,
-    sent_at: "datetime | None",
-    received_at: datetime,
-    responded_at: datetime,
-):
-    """Lưu 1 cặp hỏi-đáp đầy đủ mốc thời gian để hiện lên tab Hội thoại trên dashboard."""
+def record_conversation(chat_id, display_name, msg_type, user_text, bot_reply, sent_at, received_at, responded_at):
     duration = (responded_at - received_at).total_seconds()
     with conv_lock:
         conversations.append({
@@ -96,8 +100,7 @@ def record_conversation(
 
 
 # ============================================================
-# GEMINI (khởi tạo trễ - chỉ tạo khi thực sự có đủ API key, tránh crash lúc import
-# nếu biến môi trường chưa được set, vd lúc Render mới build xong)
+# GEMINI (khởi tạo trễ để tránh crash lúc import nếu thiếu biến môi trường)
 # ============================================================
 _gemini_client = None
 
@@ -112,7 +115,7 @@ def get_gemini_client():
     return _gemini_client
 
 
-chat_sessions: dict[str, "genai.chats.Chat"] = {}
+chat_sessions = {}
 
 
 def get_chat_session(chat_id: str):
@@ -127,10 +130,21 @@ def get_chat_session(chat_id: str):
     return chat_sessions[chat_id]
 
 
+def build_time_context() -> str:
+    """Gemini không tự biết thời gian thực - phải tự gắn kèm mỗi lần gọi,
+    nếu không nó sẽ BỊA ra 1 ngày giờ nghe hợp lý nhưng hoàn toàn sai."""
+    now = vn_now()
+    weekday_vi = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"][now.weekday()]
+    return f"[Bối cảnh hệ thống: Bây giờ là {now.strftime('%H:%M')} ngày {weekday_vi}, {now.strftime('%d/%m/%Y')} (giờ Việt Nam). Dùng thông tin này nếu người dùng hỏi về ngày giờ hiện tại, đừng tự đoán.]"
+
+
 def call_gemini(chat_id: str, parts: list) -> str:
     try:
         session = get_chat_session(chat_id)
-        response = session.send_message(parts)
+        # Gắn kèm ngày giờ thật vào MỖI lần gọi (không chỉ lúc tạo session), vì
+        # session có thể được dùng lại nhiều giờ/nhiều ngày sau lúc tạo.
+        parts_with_time = [build_time_context()] + list(parts)
+        response = session.send_message(parts_with_time)
         return response.text or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
     except errors.ClientError as e:
         stats["error_count"] += 1
@@ -149,8 +163,6 @@ def call_gemini(chat_id: str, parts: list) -> str:
 
 
 async def keep_typing(bot, chat_id: str, interval: float = 4.0):
-    """Gửi hiệu ứng 'đang gõ...' lặp lại mỗi vài giây trong lúc chờ Gemini trả lời
-    (hiệu ứng chỉ giữ được ~5s mỗi lần nên cần gửi lại liên tục)."""
     try:
         while True:
             await bot.send_chat_action(chat_id, "typing")
@@ -160,8 +172,6 @@ async def keep_typing(bot, chat_id: str, interval: float = 4.0):
 
 
 async def call_gemini_with_typing(bot, chat_id: str, parts: list) -> str:
-    """Chạy call_gemini() (hàm đồng bộ/blocking) trong 1 thread riêng, song song
-    với việc gửi hiệu ứng 'đang gõ...' liên tục - để vòng lặp async không bị đứng."""
     typing_task = asyncio.create_task(keep_typing(bot, chat_id))
     try:
         reply_text = await asyncio.to_thread(call_gemini, chat_id, parts)
@@ -200,7 +210,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     display_name = update.effective_user.display_name if update.effective_user else str(chat_id)
     sent_at = update.message.date
-    received_at = datetime.now()
+    received_at = vn_now()
     stats["message_count"] += 1
     stats["text_count"] += 1
     stats["last_message_at"] = time.time()
@@ -208,7 +218,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_text = await call_gemini_with_typing(update.get_bot(), chat_id, [text])
     await send_long_reply(update, reply_text)
-    responded_at = datetime.now()
+    responded_at = vn_now()
     record_conversation(chat_id, display_name, "text", text, reply_text, sent_at, received_at, responded_at)
     log(f"✅ Đã trả lời {display_name} (mất {(responded_at - received_at).total_seconds():.1f}s)")
 
@@ -219,7 +229,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (update.message.text or "").strip()
     display_name = update.effective_user.display_name if update.effective_user else str(chat_id)
     sent_at = update.message.date
-    received_at = datetime.now()
+    received_at = vn_now()
     stats["message_count"] += 1
     stats["photo_count"] += 1
     stats["last_message_at"] = time.time()
@@ -243,7 +253,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     reply_text = await call_gemini_with_typing(update.get_bot(), chat_id, [image_part, prompt])
     await send_long_reply(update, reply_text)
-    responded_at = datetime.now()
+    responded_at = vn_now()
     record_conversation(
         chat_id, display_name, "photo", caption or "[gửi 1 ảnh]", reply_text, sent_at, received_at, responded_at
     )
@@ -251,7 +261,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# CHẠY BOT TRONG THREAD NỀN RIÊNG (tách khỏi event loop của FastAPI)
+# CHẠY BOT TRONG THREAD NỀN RIÊNG
 # ============================================================
 def run_bot_in_background():
     if not BOT_TOKEN or not GEMINI_API_KEY:
@@ -269,7 +279,7 @@ def run_bot_in_background():
 
         stats["bot_running"] = True
         log("🤖 Bot đã khởi động, đang long-polling...")
-        app_zalo.run_polling()  # blocking - chạy mãi trong thread này
+        app_zalo.run_polling()
     except Exception as e:
         stats["bot_running"] = False
         stats["bot_error"] = str(e)
@@ -290,9 +300,8 @@ def on_startup():
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health():
-    """Endpoint để dịch vụ ping (UptimeRobot, v.v.) giữ cho Render free tier không ngủ.
-    Hỗ trợ cả GET và HEAD vì nhiều dịch vụ uptime-monitor mặc định gửi HEAD."""
     return {"status": "ok"}
+
 
 @app.get("/api/status")
 def api_status():
@@ -322,8 +331,6 @@ def api_conversations():
 
 @app.get("/api/logs/stream")
 async def stream_logs():
-    """Server-Sent Events - đẩy log mới xuống trình duyệt theo thời gian thực."""
-
     async def event_generator():
         last_sent_index = 0
         while True:
