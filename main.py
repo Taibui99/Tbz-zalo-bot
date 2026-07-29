@@ -11,13 +11,14 @@ import asyncio
 import os
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
+import uuid
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from google import genai
 from google.genai import errors, types
 
@@ -40,6 +41,27 @@ def vn_now() -> datetime:
 BOT_TOKEN = os.environ.get("ZALO_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
+IMAGE_GEN_MODEL = os.environ.get("IMAGE_GEN_MODEL", "gemini-2.5-flash-image")
+
+# URL công khai của chính server này - dùng để tạo link ảnh cho send_photo (Zalo
+# yêu cầu 1 URL, không nhận file trực tiếp). Set biến môi trường PUBLIC_URL trong
+# Render = đúng domain Render cấp (vd https://tbz-zalo-bot.onrender.com)
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+
+# Lưu ảnh AI vừa tạo trong RAM để phục vụ qua route /img/{id} - chỉ giữ tối đa
+# 50 ảnh gần nhất, ảnh cũ tự bị đẩy ra (không cần dọn dẹp thủ công)
+image_store: "OrderedDict[str, tuple]" = OrderedDict()
+image_store_lock = threading.Lock()
+MAX_STORED_IMAGES = 50
+
+
+def store_image(data: bytes, mime_type: str) -> str:
+    image_id = uuid.uuid4().hex
+    with image_store_lock:
+        image_store[image_id] = (data, mime_type)
+        while len(image_store) > MAX_STORED_IMAGES:
+            image_store.popitem(last=False)
+    return image_id
 
 SYSTEM_INSTRUCTION = (
     "Bạn là trợ lý AI thân thiện, trả lời bằng tiếng Việt, ngắn gọn và dễ hiểu. "
@@ -218,6 +240,63 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Đã xoá ngữ cảnh cũ, bắt đầu cuộc trò chuyện mới nhé 🔄")
 
 
+async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lệnh /anh <mô tả> - tạo ảnh bằng Gemini (Nano Banana) rồi gửi qua Zalo."""
+    chat_id = update.message.chat.id
+    prompt = update.message.text.replace("/anh", "", 1).strip()
+
+    if not prompt:
+        await update.message.reply_text("Dùng kiểu: /anh một chú mèo đội nón lá đang ngồi học bài")
+        return
+
+    if not PUBLIC_URL:
+        await update.message.reply_text(
+            "Bot chưa cấu hình PUBLIC_URL nên chưa gửi ảnh được. Cần set biến môi "
+            "trường PUBLIC_URL = domain Render của bot."
+        )
+        return
+
+    await context.bot.send_chat_action(chat_id, "typing")
+    try:
+        def _gen():
+            client = get_gemini_client()
+            return client.models.generate_content(
+                model=IMAGE_GEN_MODEL,
+                contents=prompt,
+                config={"response_modalities": ["IMAGE"]},
+            )
+
+        response = await asyncio.to_thread(_gen)
+        image_bytes = None
+        mime_type = "image/png"
+        for part in response.candidates[0].content.parts:
+            if getattr(part, "inline_data", None):
+                image_bytes = part.inline_data.data
+                mime_type = part.inline_data.mime_type or mime_type
+                break
+
+        if not image_bytes:
+            await update.message.reply_text("Gemini không trả về ảnh nào, thử mô tả khác xem sao.")
+            return
+
+        image_id = store_image(image_bytes, mime_type)
+        photo_url = f"{PUBLIC_URL}/img/{image_id}"
+        await context.bot.send_photo(chat_id, prompt[:200], photo_url)
+        log(f"🎨 Đã tạo & gửi ảnh AI cho {chat_id}: {prompt[:50]!r}")
+    except Exception as e:
+        stats["error_count"] += 1
+        log(f"⚠️  Lỗi tạo ảnh: {e}")
+        await update.message.reply_text("Xin lỗi, mình gặp lỗi lúc tạo ảnh. Thử lại sau nhé.")
+
+
+async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Nhận sticker - log lại mã ID để bro thu thập, dùng gắn vào STICKER_LIBRARY."""
+    chat_id = update.message.chat.id
+    sticker_id = update.message.sticker
+    log(f"🎟️  Nhận sticker từ {chat_id} - mã ID: {sticker_id}")
+    await update.message.reply_text(f"Đã nhận sticker, mã ID của nó là:\n{sticker_id}")
+
+
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     text = update.message.text
@@ -288,7 +367,9 @@ def run_bot_in_background():
         app_zalo = ApplicationBuilder().token(BOT_TOKEN).build()
         app_zalo.add_handler(CommandHandler("start", start))
         app_zalo.add_handler(CommandHandler("reset", reset))
+        app_zalo.add_handler(CommandHandler("anh", generate_image))
         app_zalo.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+        app_zalo.add_handler(MessageHandler(filters.STICKER, handle_sticker))
         app_zalo.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
         app_zalo.bot.delete_webhook()
 
@@ -316,6 +397,16 @@ async def on_startup():
         asyncio.create_task(scheduler.run_scheduler(BOT_TOKEN, vn_now, log))
     else:
         log("⚠️  Chưa có ZALO_BOT_TOKEN - scheduler (chào buổi sáng/thời khóa biểu) không chạy.")
+
+
+@app.get("/img/{image_id}")
+def serve_image(image_id: str):
+    with image_store_lock:
+        entry = image_store.get(image_id)
+    if not entry:
+        return Response(content="Không tìm thấy ảnh (có thể đã hết hạn)", status_code=404)
+    data, mime_type = entry
+    return Response(content=data, media_type=mime_type)
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
