@@ -21,6 +21,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from google import genai
 from google.genai import errors, types
 
+import scheduler
+import storage
 from zalo_bot import Update
 from zalo_bot.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -40,7 +42,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 SYSTEM_INSTRUCTION = (
-    "Bạn là trợ lý AI thân với người dùng như 1 người bạn thật sự, trả lời bằng tiếng Việt, chính xác và không dài dòng. "
+    "Bạn là trợ lý AI thân thiện, trả lời bằng tiếng Việt, ngắn gọn và dễ hiểu. "
     "Mỗi tin nhắn người dùng gửi đều có kèm 1 dòng '[Bối cảnh hệ thống: Bây giờ là...]' "
     "ghi rõ thời điểm thực tế tin đó được gửi - đây không phải nội dung người dùng "
     "gõ, chỉ là thông tin nền. Hãy để ý các mốc thời gian này xuyên suốt lịch sử "
@@ -171,6 +173,17 @@ async def keep_typing(bot, chat_id: str, interval: float = 4.0):
         pass
 
 
+def ensure_owner_captured(chat_id: str):
+    """Tự động ghi nhớ chat_id của người nhắn ĐẦU TIÊN làm 'chủ bot' (owner) -
+    để scheduler biết gửi thông báo chào buổi sáng/thời khóa biểu cho ai.
+    Có thể đổi lại qua trang Cài đặt trên dashboard nếu cần."""
+    data = storage.load_data()
+    if not data.get("owner_chat_id"):
+        data["owner_chat_id"] = chat_id
+        storage.save_data(data)
+        log(f"👤 Đã tự động đặt {chat_id} làm chủ bot (owner) - dùng cho thông báo chào buổi sáng/thời khóa biểu")
+
+
 async def call_gemini_with_typing(bot, chat_id: str, parts: list) -> str:
     typing_task = asyncio.create_task(keep_typing(bot, chat_id))
     try:
@@ -211,6 +224,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     display_name = update.effective_user.display_name if update.effective_user else str(chat_id)
     sent_at = update.message.date
     received_at = vn_now()
+    ensure_owner_captured(chat_id)
     stats["message_count"] += 1
     stats["text_count"] += 1
     stats["last_message_at"] = time.time()
@@ -230,6 +244,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     display_name = update.effective_user.display_name if update.effective_user else str(chat_id)
     sent_at = update.message.date
     received_at = vn_now()
+    ensure_owner_captured(chat_id)
     stats["message_count"] += 1
     stats["photo_count"] += 1
     stats["last_message_at"] = time.time()
@@ -293,9 +308,14 @@ app = FastAPI()
 
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     thread = threading.Thread(target=run_bot_in_background, daemon=True)
     thread.start()
+
+    if BOT_TOKEN:
+        asyncio.create_task(scheduler.run_scheduler(BOT_TOKEN, vn_now, log))
+    else:
+        log("⚠️  Chưa có ZALO_BOT_TOKEN - scheduler (chào buổi sáng/thời khóa biểu) không chạy.")
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
@@ -321,6 +341,34 @@ def api_status():
         "last_message_at": stats["last_message_at"],
         "uptime_seconds": uptime_seconds,
     }
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    data = storage.load_data()
+    # không cần trả về các field nội bộ (_last_sent_date, _sent_today) cho frontend
+    return {
+        "owner_chat_id": data.get("owner_chat_id"),
+        "morning_greeting": data.get("morning_greeting"),
+        "location": data.get("location"),
+        "schedule": data.get("schedule"),
+    }
+
+
+@app.put("/api/settings")
+async def api_put_settings(request: dict):
+    data = storage.load_data()
+    if "owner_chat_id" in request:
+        data["owner_chat_id"] = request["owner_chat_id"] or None
+    if "morning_greeting" in request:
+        data["morning_greeting"] = request["morning_greeting"]
+    if "location" in request:
+        data["location"] = request["location"]
+    if "schedule" in request:
+        data["schedule"] = request["schedule"]
+    storage.save_data(data)
+    log("⚙️  Đã cập nhật cài đặt (chào buổi sáng / thời khóa biểu / vị trí)")
+    return {"success": True}
 
 
 @app.get("/api/conversations")
@@ -377,6 +425,24 @@ def dashboard():
   .conv-bot { color: #d1d5db; white-space: pre-wrap; }
   .badge { display: inline-block; background: #334155; border-radius: 6px; padding: 1px 6px;
            font-size: 10px; margin-left: 6px; }
+  .settings-box { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  .settings-box h3 { margin-top: 0; font-size: 15px; }
+  .field-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .field-row label { font-size: 13px; color: #94a3b8; min-width: 110px; }
+  .field-row input[type=text], .field-row input[type=time], .field-row input[type=number] {
+    background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px;
+    padding: 6px 10px; font-size: 13px;
+  }
+  .day-block { margin-bottom: 14px; }
+  .day-block h4 { font-size: 13px; color: #93c5fd; margin: 0 0 6px 0; }
+  .period-row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .period-row input { width: 90px; }
+  .period-row input.subject { width: 140px; }
+  .btn { background: #3b82f6; color: white; border: none; border-radius: 6px; padding: 6px 14px;
+         font-size: 13px; cursor: pointer; }
+  .btn.secondary { background: #334155; }
+  .btn.danger { background: #ef4444; padding: 4px 8px; }
+  .save-bar { position: sticky; bottom: 0; background: #0f172a; padding: 12px 0; }
 </style>
 </head>
 <body>
@@ -394,6 +460,7 @@ def dashboard():
   <div class="tabs">
     <button class="tab-btn active" id="tab-conv-btn" onclick="showTab('conv')">💬 Hội thoại</button>
     <button class="tab-btn" id="tab-log-btn" onclick="showTab('log')">📜 Log hệ thống</button>
+    <button class="tab-btn" id="tab-settings-btn" onclick="showTab('settings')">⚙️ Cài đặt</button>
   </div>
 
   <div class="panel active" id="panel-conv">
@@ -402,13 +469,68 @@ def dashboard():
   <div class="panel" id="panel-log">
     <div id="logs"></div>
   </div>
+  <div class="panel" id="panel-settings">
+    <div class="settings-box">
+      <h3>👤 Chủ bot</h3>
+      <p style="font-size:12px;color:#64748b;margin-top:-4px">
+        Tự động ghi nhận từ người đầu tiên nhắn tin cho bot. Đây là người sẽ nhận
+        thông báo chào buổi sáng / thời khóa biểu.
+      </p>
+      <div class="field-row">
+        <label>Chat ID</label>
+        <input type="text" id="owner-chat-id" placeholder="Chưa có ai nhắn tin" style="width:280px">
+      </div>
+    </div>
+
+    <div class="settings-box">
+      <h3>☀️ Chào buổi sáng</h3>
+      <div class="field-row">
+        <label><input type="checkbox" id="morning-enabled"> Bật</label>
+        <label>Giờ gửi</label>
+        <input type="time" id="morning-time" value="07:00">
+      </div>
+    </div>
+
+    <div class="settings-box">
+      <h3>📍 Vị trí (để lấy thời tiết)</h3>
+      <div class="field-row">
+        <label>Tên nơi ở</label>
+        <input type="text" id="loc-name" style="width:200px">
+      </div>
+      <div class="field-row">
+        <label>Vĩ độ (lat)</label>
+        <input type="number" step="0.01" id="loc-lat">
+        <label>Kinh độ (lon)</label>
+        <input type="number" step="0.01" id="loc-lon">
+      </div>
+      <p style="font-size:12px;color:#64748b">
+        Tra toạ độ nơi bro ở tại
+        <a href="https://www.latlong.net" target="_blank" style="color:#60a5fa">latlong.net</a>
+      </p>
+    </div>
+
+    <div class="settings-box">
+      <h3>📅 Thời khóa biểu</h3>
+      <div id="schedule-editor"></div>
+    </div>
+
+    <div class="save-bar">
+      <button class="btn" onclick="saveSettings()">💾 Lưu cài đặt</button>
+      <span id="save-status" style="margin-left:10px;font-size:13px;color:#4ade80"></span>
+    </div>
+  </div>
 
 <script>
+const DAY_LABELS = {Mon:'Thứ Hai', Tue:'Thứ Ba', Wed:'Thứ Tư', Thu:'Thứ Năm', Fri:'Thứ Sáu', Sat:'Thứ Bảy', Sun:'Chủ Nhật'};
+let currentSchedule = {Mon:[],Tue:[],Wed:[],Thu:[],Fri:[],Sat:[],Sun:[]};
+
 function showTab(name) {
   document.getElementById('panel-conv').className = 'panel' + (name === 'conv' ? ' active' : '');
   document.getElementById('panel-log').className = 'panel' + (name === 'log' ? ' active' : '');
+  document.getElementById('panel-settings').className = 'panel' + (name === 'settings' ? ' active' : '');
   document.getElementById('tab-conv-btn').className = 'tab-btn' + (name === 'conv' ? ' active' : '');
   document.getElementById('tab-log-btn').className = 'tab-btn' + (name === 'log' ? ' active' : '');
+  document.getElementById('tab-settings-btn').className = 'tab-btn' + (name === 'settings' ? ' active' : '');
 }
 
 async function refreshStatus() {
@@ -459,8 +581,91 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+async function loadSettings() {
+  const res = await fetch('/api/settings');
+  const data = await res.json();
+  document.getElementById('owner-chat-id').value = data.owner_chat_id || '';
+  document.getElementById('morning-enabled').checked = !!(data.morning_greeting && data.morning_greeting.enabled);
+  document.getElementById('morning-time').value = (data.morning_greeting && data.morning_greeting.time) || '07:00';
+  document.getElementById('loc-name').value = (data.location && data.location.name) || '';
+  document.getElementById('loc-lat').value = (data.location && data.location.lat) || '';
+  document.getElementById('loc-lon').value = (data.location && data.location.lon) || '';
+  currentSchedule = data.schedule || currentSchedule;
+  renderScheduleEditor();
+}
+
+function renderScheduleEditor() {
+  const container = document.getElementById('schedule-editor');
+  container.innerHTML = Object.keys(DAY_LABELS).map(day => `
+    <div class="day-block">
+      <h4>${DAY_LABELS[day]}</h4>
+      <div id="day-${day}">
+        ${(currentSchedule[day] || []).map((p, i) => periodRowHtml(day, i, p)).join('')}
+      </div>
+      <button class="btn secondary" onclick="addPeriod('${day}')" style="font-size:12px;padding:4px 10px">+ Thêm tiết</button>
+    </div>
+  `).join('');
+}
+
+function periodRowHtml(day, i, p) {
+  return `
+    <div class="period-row">
+      <input type="time" value="${p.start || ''}" onchange="updatePeriod('${day}',${i},'start',this.value)">
+      <span>-</span>
+      <input type="time" value="${p.end || ''}" onchange="updatePeriod('${day}',${i},'end',this.value)">
+      <input type="text" class="subject" placeholder="Môn học" value="${p.subject || ''}" onchange="updatePeriod('${day}',${i},'subject',this.value)">
+      <button class="btn danger" onclick="removePeriod('${day}',${i})">✕</button>
+    </div>
+  `;
+}
+
+function addPeriod(day) {
+  currentSchedule[day] = currentSchedule[day] || [];
+  currentSchedule[day].push({start: '', end: '', subject: ''});
+  renderScheduleEditor();
+}
+
+function removePeriod(day, i) {
+  currentSchedule[day].splice(i, 1);
+  renderScheduleEditor();
+}
+
+function updatePeriod(day, i, field, value) {
+  currentSchedule[day][i][field] = value;
+}
+
+async function saveSettings() {
+  const payload = {
+    owner_chat_id: document.getElementById('owner-chat-id').value.trim(),
+    morning_greeting: {
+      enabled: document.getElementById('morning-enabled').checked,
+      time: document.getElementById('morning-time').value,
+    },
+    location: {
+      name: document.getElementById('loc-name').value.trim(),
+      lat: parseFloat(document.getElementById('loc-lat').value),
+      lon: parseFloat(document.getElementById('loc-lon').value),
+    },
+    schedule: currentSchedule,
+  };
+  const res = await fetch('/api/settings', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const statusEl = document.getElementById('save-status');
+  if (res.ok) {
+    statusEl.textContent = '✓ Đã lưu!';
+    setTimeout(() => statusEl.textContent = '', 2000);
+  } else {
+    statusEl.textContent = '✗ Lỗi khi lưu';
+    statusEl.style.color = '#f87171';
+  }
+}
+
 refreshStatus();
 refreshConversations();
+loadSettings();
 setInterval(refreshStatus, 5000);
 setInterval(refreshConversations, 5000);
 
