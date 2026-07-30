@@ -142,15 +142,48 @@ def get_gemini_client():
 chat_sessions = {}
 
 
-def get_chat_session(chat_id: str):
-    if chat_id not in chat_sessions:
-        chat_sessions[chat_id] = get_gemini_client().chats.create(
-            model=GEMINI_MODEL,
-            config={
-                "system_instruction": SYSTEM_INSTRUCTION,
-                "thinking_config": {"thinking_level": "minimal"},
+def build_sticker_tool():
+    """Xây khai báo hàm 'send_sticker' cho Gemini, liệt kê đúng các mood đang có
+    trong thư viện sticker (cài trên dashboard). Nếu chưa có sticker nào thì
+    không đưa tool này vào, tránh Gemini cố gọi 1 hàm vô nghĩa."""
+    data = storage.load_data()
+    library = data.get("sticker_library", {})
+    if not library:
+        return None
+    moods = list(library.keys())
+    return types.Tool(function_declarations=[
+        types.FunctionDeclaration(
+            name="send_sticker",
+            description=(
+                "Gửi 1 sticker Zalo phù hợp với cảm xúc/ngữ cảnh cuộc trò chuyện hiện tại. "
+                "Chỉ gọi hàm này khi thực sự phù hợp (vd người dùng vui, buồn, đùa giỡn, "
+                "cảm ơn...), không lạm dụng, không gọi liên tục."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "mood": {
+                        "type": "string",
+                        "enum": moods,
+                        "description": "Cảm xúc/ngữ cảnh phù hợp nhất trong danh sách có sẵn",
+                    }
+                },
+                "required": ["mood"],
             },
         )
+    ])
+
+
+def get_chat_session(chat_id: str):
+    if chat_id not in chat_sessions:
+        config = {
+            "system_instruction": SYSTEM_INSTRUCTION,
+            "thinking_config": {"thinking_level": "minimal"},
+        }
+        sticker_tool = build_sticker_tool()
+        if sticker_tool:
+            config["tools"] = [sticker_tool]
+        chat_sessions[chat_id] = get_gemini_client().chats.create(model=GEMINI_MODEL, config=config)
     return chat_sessions[chat_id]
 
 
@@ -162,28 +195,49 @@ def build_time_context() -> str:
     return f"[Bối cảnh hệ thống: Bây giờ là {now.strftime('%H:%M')} ngày {weekday_vi}, {now.strftime('%d/%m/%Y')} (giờ Việt Nam). Dùng thông tin này nếu người dùng hỏi về ngày giờ hiện tại, đừng tự đoán.]"
 
 
-def call_gemini(chat_id: str, parts: list) -> str:
+def call_gemini(chat_id: str, parts: list) -> tuple:
+    """Trả về (text_trả_lời, sticker_id_hoặc_None). Nếu Gemini quyết định gửi
+    sticker (qua function calling), sticker_id sẽ được điền, người gọi hàm này
+    (ở phần async) chịu trách nhiệm gọi bot.send_sticker() thật sự."""
+    sticker_id_to_send = None
     try:
         session = get_chat_session(chat_id)
         # Gắn kèm ngày giờ thật vào MỖI lần gọi (không chỉ lúc tạo session), vì
         # session có thể được dùng lại nhiều giờ/nhiều ngày sau lúc tạo.
         parts_with_time = [build_time_context()] + list(parts)
         response = session.send_message(parts_with_time)
-        return response.text or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
+
+        if response.function_calls:
+            for fc in response.function_calls:
+                if fc.name == "send_sticker":
+                    mood = fc.args.get("mood")
+                    data = storage.load_data()
+                    sticker_id_to_send = data.get("sticker_library", {}).get(mood)
+                    result_msg = "đã gửi sticker cho người dùng" if sticker_id_to_send else "không có sticker phù hợp, bỏ qua"
+                    function_response_part = types.Part.from_function_response(
+                        name="send_sticker", response={"result": result_msg}
+                    )
+                    # Gửi kết quả hàm về để Gemini hoàn thành lượt trả lời bằng text
+                    response = session.send_message([function_response_part])
+                    break
+
+        text = response.text or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
+        return text, sticker_id_to_send
     except errors.ClientError as e:
         stats["error_count"] += 1
         if e.code == 429:
             log(f"⚠️  Gemini rate limit (429): {e}")
             return (
                 "Bot đang bị giới hạn tốc độ của Gemini free tier. "
-                "Bro đợi khoảng 1 phút rồi nhắn lại nhé 🙏"
+                "Bro đợi khoảng 1 phút rồi nhắn lại nhé 🙏",
+                None,
             )
         log(f"⚠️  Lỗi Gemini (ClientError): {e}")
-        return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé."
+        return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None
     except Exception as e:
         stats["error_count"] += 1
         log(f"⚠️  Lỗi gọi Gemini: {e}")
-        return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé."
+        return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None
 
 
 async def keep_typing(bot, chat_id: str, interval: float = 4.0):
@@ -206,13 +260,13 @@ def ensure_owner_captured(chat_id: str):
         log(f"👤 Đã tự động đặt {chat_id} làm chủ bot (owner) - dùng cho thông báo chào buổi sáng/thời khóa biểu")
 
 
-async def call_gemini_with_typing(bot, chat_id: str, parts: list) -> str:
+async def call_gemini_with_typing(bot, chat_id: str, parts: list) -> tuple:
     typing_task = asyncio.create_task(keep_typing(bot, chat_id))
     try:
-        reply_text = await asyncio.to_thread(call_gemini, chat_id, parts)
+        result = await asyncio.to_thread(call_gemini, chat_id, parts)
     finally:
         typing_task.cancel()
-    return reply_text
+    return result
 
 
 # ============================================================
@@ -309,7 +363,13 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats["last_message_at"] = time.time()
     log(f"📩 Nhận tin nhắn từ {display_name} ({chat_id}): {text!r}")
 
-    reply_text = await call_gemini_with_typing(update.get_bot(), chat_id, [text])
+    reply_text, sticker_id = await call_gemini_with_typing(update.get_bot(), chat_id, [text])
+    if sticker_id:
+        try:
+            await update.get_bot().send_sticker(chat_id, sticker_id)
+            log(f"🎟️  Đã gửi sticker ({sticker_id}) cho {chat_id}")
+        except Exception as e:
+            log(f"⚠️  Lỗi gửi sticker: {e}")
     await send_long_reply(update, reply_text)
     responded_at = vn_now()
     record_conversation(chat_id, display_name, "text", text, reply_text, sent_at, received_at, responded_at)
@@ -345,7 +405,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=content_type)
     prompt = caption if caption else "Mô tả và phân tích nội dung trong ảnh này giúp mình."
 
-    reply_text = await call_gemini_with_typing(update.get_bot(), chat_id, [image_part, prompt])
+    reply_text, sticker_id = await call_gemini_with_typing(update.get_bot(), chat_id, [image_part, prompt])
+    if sticker_id:
+        try:
+            await update.get_bot().send_sticker(chat_id, sticker_id)
+            log(f"🎟️  Đã gửi sticker ({sticker_id}) cho {chat_id}")
+        except Exception as e:
+            log(f"⚠️  Lỗi gửi sticker: {e}")
     await send_long_reply(update, reply_text)
     responded_at = vn_now()
     record_conversation(
@@ -443,6 +509,7 @@ def api_get_settings():
         "morning_greeting": data.get("morning_greeting"),
         "location": data.get("location"),
         "schedule": data.get("schedule"),
+        "sticker_library": data.get("sticker_library", {}),
     }
 
 
@@ -457,6 +524,11 @@ async def api_put_settings(request: dict):
         data["location"] = request["location"]
     if "schedule" in request:
         data["schedule"] = request["schedule"]
+    if "sticker_library" in request:
+        data["sticker_library"] = request["sticker_library"]
+        # xoá session cache để phiên chat mới nhất định biết các sticker mới cài
+        chat_sessions.clear()
+        log("🎟️  Đã cập nhật thư viện sticker, các phiên chat sẽ dùng bộ mới từ tin nhắn tiếp theo")
     storage.save_data(data)
     log("⚙️  Đã cập nhật cài đặt (chào buổi sáng / thời khóa biểu / vị trí)")
     return {"success": True}
@@ -491,67 +563,158 @@ def dashboard():
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
-<title>Zalo Bot Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TBZ-BOT // console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  body { font-family: -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }
-  h1 { font-size: 20px; }
-  .cards { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
-  .card { background: #1e293b; border-radius: 12px; padding: 14px 18px; min-width: 120px; }
-  .card .label { font-size: 12px; color: #94a3b8; }
-  .card .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
-  .ok { color: #4ade80; }
-  .err { color: #f87171; }
-  .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
-  .tab-btn { background: #1e293b; border: none; color: #94a3b8; padding: 8px 16px;
-             border-radius: 8px; cursor: pointer; font-size: 14px; }
-  .tab-btn.active { background: #3b82f6; color: white; }
-  .panel { display: none; }
-  .panel.active { display: block; }
-  #logs { background: #000; border-radius: 12px; padding: 16px; height: 55vh; overflow-y: auto;
-          font-family: monospace; font-size: 13px; white-space: pre-wrap; }
-  #conversations { height: 55vh; overflow-y: auto; }
-  .conv-item { background: #1e293b; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
-  .conv-meta { font-size: 11px; color: #64748b; margin-bottom: 6px; }
-  .conv-user { color: #93c5fd; margin-bottom: 6px; }
-  .conv-bot { color: #d1d5db; white-space: pre-wrap; }
-  .badge { display: inline-block; background: #334155; border-radius: 6px; padding: 1px 6px;
-           font-size: 10px; margin-left: 6px; }
-  .settings-box { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
-  .settings-box h3 { margin-top: 0; font-size: 15px; }
-  .field-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-  .field-row label { font-size: 13px; color: #94a3b8; min-width: 110px; }
-  .field-row input[type=text], .field-row input[type=time], .field-row input[type=number] {
-    background: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 6px;
-    padding: 6px 10px; font-size: 13px;
+  :root {
+    --bg: #0a0d0a;
+    --panel: #12140f;
+    --panel-raised: #171a13;
+    --line: #2a2f22;
+    --ink: #d4d9c8;
+    --dim: #6f7562;
+    --amber: #ffb454;
+    --amber-dim: #8a6a3a;
+    --ok: #7ee081;
+    --err: #ff6b6b;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+    --sans: 'IBM Plex Sans', -apple-system, sans-serif;
   }
-  .day-block { margin-bottom: 14px; }
-  .day-block h4 { font-size: 13px; color: #93c5fd; margin: 0 0 6px 0; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: var(--sans); background: var(--bg); color: var(--ink);
+    margin: 0; padding: 20px 16px 40px; min-height: 100vh;
+    background-image:
+      repeating-linear-gradient(180deg, rgba(255,255,255,0.015) 0px, rgba(255,255,255,0.015) 1px, transparent 1px, transparent 3px);
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+
+  .console-header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 18px;
+    flex-wrap: wrap; gap: 8px;
+  }
+  .console-header .title {
+    font-family: var(--mono); font-size: 15px; letter-spacing: 0.06em; color: var(--amber);
+    font-weight: 600;
+  }
+  .console-header .title .dim-part { color: var(--dim); font-weight: 400; }
+  .cursor-blink {
+    display: inline-block; width: 8px; height: 15px; background: var(--amber);
+    margin-left: 4px; vertical-align: text-bottom; animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .readouts {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 1px; background: var(--line); border: 1px solid var(--line);
+    margin-bottom: 22px; border-radius: 3px; overflow: hidden;
+  }
+  .readout { background: var(--panel); padding: 11px 14px; }
+  .readout .label {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; color: var(--dim);
+    text-transform: uppercase;
+  }
+  .readout .value {
+    font-family: var(--mono); font-size: 19px; font-weight: 600; margin-top: 3px; color: var(--ink);
+  }
+  .ok { color: var(--ok) !important; }
+  .err { color: var(--err) !important; }
+
+  .tabs { display: flex; gap: 2px; margin-bottom: 0; border-bottom: 1px solid var(--line); }
+  .tab-btn {
+    background: transparent; border: none; color: var(--dim); padding: 9px 16px 10px;
+    cursor: pointer; font-size: 13px; font-family: var(--mono); letter-spacing: 0.03em;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tab-btn.active { color: var(--amber); border-bottom-color: var(--amber); }
+  .tab-btn:hover:not(.active) { color: var(--ink); }
+
+  .panel { display: none; padding-top: 16px; }
+  .panel.active { display: block; }
+
+  #logs {
+    background: #060704; border: 1px solid var(--line); border-radius: 3px; padding: 14px 16px;
+    height: 55vh; overflow-y: auto; font-family: var(--mono); font-size: 12.5px;
+    white-space: pre-wrap; color: var(--ok); line-height: 1.6;
+  }
+  #conversations { height: 55vh; overflow-y: auto; }
+  .conv-item {
+    background: var(--panel); border: 1px solid var(--line); border-left: 2px solid var(--amber-dim);
+    border-radius: 2px; padding: 12px 14px; margin-bottom: 8px;
+  }
+  .conv-meta { font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin-bottom: 7px; letter-spacing: 0.01em; }
+  .conv-meta strong { color: var(--ink); font-weight: 600; }
+  .conv-user { color: var(--amber); margin-bottom: 5px; font-size: 13.5px; }
+  .conv-bot { color: var(--ink); white-space: pre-wrap; font-size: 13.5px; opacity: 0.9; }
+  .badge {
+    display: inline-block; background: var(--panel-raised); border: 1px solid var(--line);
+    border-radius: 3px; padding: 1px 6px; font-size: 10px; margin-left: 6px; color: var(--dim);
+  }
+  .empty-state { color: var(--dim); text-align: center; padding: 40px 0; font-family: var(--mono); font-size: 13px; }
+
+  .settings-box {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
+    padding: 18px 20px; margin-bottom: 14px;
+  }
+  .settings-box h3 {
+    margin: 0 0 4px; font-size: 12.5px; font-family: var(--mono); letter-spacing: 0.05em;
+    color: var(--amber); text-transform: uppercase; font-weight: 600;
+  }
+  .settings-box .hint { font-size: 12px; color: var(--dim); margin: 0 0 12px; }
+  .field-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .field-row label { font-size: 13px; color: var(--dim); min-width: 100px; }
+  .field-row input[type=text], .field-row input[type=time], .field-row input[type=number] {
+    background: var(--bg); border: 1px solid var(--line); color: var(--ink); border-radius: 2px;
+    padding: 6px 10px; font-size: 13px; font-family: var(--mono);
+  }
+  .field-row input:focus { outline: 1px solid var(--amber-dim); border-color: var(--amber-dim); }
+  .field-row a { color: var(--amber); }
+
+  .day-block { margin-bottom: 12px; }
+  .day-block h4 {
+    font-size: 11px; color: var(--dim); margin: 0 0 6px; font-family: var(--mono);
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
   .period-row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
-  .period-row input { width: 90px; }
-  .period-row input.subject { width: 140px; }
-  .btn { background: #3b82f6; color: white; border: none; border-radius: 6px; padding: 6px 14px;
-         font-size: 13px; cursor: pointer; }
-  .btn.secondary { background: #334155; }
-  .btn.danger { background: #ef4444; padding: 4px 8px; }
-  .save-bar { position: sticky; bottom: 0; background: #0f172a; padding: 12px 0; }
+  .period-row input { width: 88px; }
+  .period-row input.subject { width: 150px; font-family: var(--sans); }
+
+  .btn {
+    background: var(--amber); color: #1a1408; border: none; border-radius: 2px; padding: 7px 16px;
+    font-size: 13px; cursor: pointer; font-family: var(--mono); font-weight: 600; letter-spacing: 0.02em;
+  }
+  .btn:hover { background: #ffc670; }
+  .btn.secondary { background: transparent; color: var(--dim); border: 1px solid var(--line); }
+  .btn.secondary:hover { color: var(--ink); border-color: var(--dim); }
+  .btn.danger { background: transparent; color: var(--err); border: 1px solid var(--line); padding: 4px 9px; }
+  .save-bar { position: sticky; bottom: 0; background: var(--bg); padding: 14px 0 4px; border-top: 1px solid var(--line); margin-top: 4px; }
+  #save-status { font-family: var(--mono); font-size: 12px; }
 </style>
 </head>
 <body>
-  <h1>🤖 Zalo Bot Dashboard</h1>
-  <div class="cards">
-    <div class="card"><div class="label">Trạng thái</div><div class="value" id="status">...</div></div>
-    <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">...</div></div>
-    <div class="card"><div class="label">Tổng tin nhắn</div><div class="value" id="count">...</div></div>
-    <div class="card"><div class="label">Người dùng</div><div class="value" id="users">...</div></div>
-    <div class="card"><div class="label">Text / Ảnh</div><div class="value" id="breakdown">...</div></div>
-    <div class="card"><div class="label">Phản hồi TB</div><div class="value" id="avgtime">...</div></div>
-    <div class="card"><div class="label">Lỗi</div><div class="value" id="errors">...</div></div>
+<div class="wrap">
+
+  <div class="console-header">
+    <div class="title">TBZ-BOT <span class="dim-part">// console</span><span class="cursor-blink"></span></div>
+  </div>
+
+  <div class="readouts">
+    <div class="readout"><div class="label">Trạng thái</div><div class="value" id="status">···</div></div>
+    <div class="readout"><div class="label">Uptime</div><div class="value" id="uptime">···</div></div>
+    <div class="readout"><div class="label">Tin nhắn</div><div class="value" id="count">···</div></div>
+    <div class="readout"><div class="label">Người dùng</div><div class="value" id="users">···</div></div>
+    <div class="readout"><div class="label">Text/Ảnh</div><div class="value" id="breakdown">···</div></div>
+    <div class="readout"><div class="label">Phản hồi TB</div><div class="value" id="avgtime">···</div></div>
+    <div class="readout"><div class="label">Lỗi</div><div class="value" id="errors">···</div></div>
   </div>
 
   <div class="tabs">
-    <button class="tab-btn active" id="tab-conv-btn" onclick="showTab('conv')">💬 Hội thoại</button>
-    <button class="tab-btn" id="tab-log-btn" onclick="showTab('log')">📜 Log hệ thống</button>
-    <button class="tab-btn" id="tab-settings-btn" onclick="showTab('settings')">⚙️ Cài đặt</button>
+    <button class="tab-btn active" id="tab-conv-btn" onclick="showTab('conv')">[ HỘI THOẠI ]</button>
+    <button class="tab-btn" id="tab-log-btn" onclick="showTab('log')">[ LOG ]</button>
+    <button class="tab-btn" id="tab-settings-btn" onclick="showTab('settings')">[ CÀI ĐẶT ]</button>
   </div>
 
   <div class="panel active" id="panel-conv">
@@ -562,11 +725,8 @@ def dashboard():
   </div>
   <div class="panel" id="panel-settings">
     <div class="settings-box">
-      <h3>👤 Chủ bot</h3>
-      <p style="font-size:12px;color:#64748b;margin-top:-4px">
-        Tự động ghi nhận từ người đầu tiên nhắn tin cho bot. Đây là người sẽ nhận
-        thông báo chào buổi sáng / thời khóa biểu.
-      </p>
+      <h3>Chủ bot</h3>
+      <p class="hint">Tự động ghi nhận từ người đầu tiên nhắn tin cho bot. Đây là người sẽ nhận thông báo chào buổi sáng / thời khóa biểu.</p>
       <div class="field-row">
         <label>Chat ID</label>
         <input type="text" id="owner-chat-id" placeholder="Chưa có ai nhắn tin" style="width:280px">
@@ -574,7 +734,7 @@ def dashboard():
     </div>
 
     <div class="settings-box">
-      <h3>☀️ Chào buổi sáng</h3>
+      <h3>Chào buổi sáng</h3>
       <div class="field-row">
         <label><input type="checkbox" id="morning-enabled"> Bật</label>
         <label>Giờ gửi</label>
@@ -583,7 +743,7 @@ def dashboard():
     </div>
 
     <div class="settings-box">
-      <h3>📍 Vị trí (để lấy thời tiết)</h3>
+      <h3>Vị trí (để lấy thời tiết)</h3>
       <div class="field-row">
         <label>Tên nơi ở</label>
         <input type="text" id="loc-name" style="width:200px">
@@ -594,23 +754,21 @@ def dashboard():
         <label>Kinh độ (lon)</label>
         <input type="number" step="0.01" id="loc-lon">
       </div>
-      <p style="font-size:12px;color:#64748b">
-        Tra toạ độ nơi bro ở tại
-        <a href="https://www.latlong.net" target="_blank" style="color:#60a5fa">latlong.net</a>
-      </p>
+      <p class="hint">Tra toạ độ nơi bro ở tại <a href="https://www.latlong.net" target="_blank">latlong.net</a></p>
     </div>
 
     <div class="settings-box">
-      <h3>📅 Thời khóa biểu</h3>
+      <h3>Thời khóa biểu</h3>
       <div id="schedule-editor"></div>
     </div>
 
     <div class="save-bar">
-      <button class="btn" onclick="saveSettings()">💾 Lưu cài đặt</button>
-      <span id="save-status" style="margin-left:10px;font-size:13px;color:#4ade80"></span>
+      <button class="btn" onclick="saveSettings()">LƯU CÀI ĐẶT</button>
+      <span id="save-status" style="margin-left:10px"></span>
     </div>
   </div>
 
+</div>
 <script>
 const DAY_LABELS = {Mon:'Thứ Hai', Tue:'Thứ Ba', Wed:'Thứ Tư', Thu:'Thứ Năm', Fri:'Thứ Sáu', Sat:'Thứ Bảy', Sun:'Chủ Nhật'};
 let currentSchedule = {Mon:[],Tue:[],Wed:[],Thu:[],Fri:[],Sat:[],Sun:[]};
@@ -628,18 +786,18 @@ async function refreshStatus() {
   const res = await fetch('/api/status');
   const data = await res.json();
   const statusEl = document.getElementById('status');
-  statusEl.textContent = data.bot_running ? 'Đang chạy' : 'Lỗi / chưa chạy';
+  statusEl.textContent = data.bot_running ? 'ONLINE' : 'OFFLINE';
   statusEl.className = 'value ' + (data.bot_running ? 'ok' : 'err');
   document.getElementById('count').textContent = data.message_count;
   document.getElementById('users').textContent = data.unique_users;
-  document.getElementById('breakdown').textContent = `${data.text_count} / ${data.photo_count}`;
+  document.getElementById('breakdown').textContent = `${data.text_count}/${data.photo_count}`;
   document.getElementById('avgtime').textContent = data.avg_response_seconds + 's';
   const errEl = document.getElementById('errors');
   errEl.textContent = data.error_count;
   errEl.className = 'value ' + (data.error_count > 0 ? 'err' : '');
   const h = Math.floor(data.uptime_seconds / 3600);
   const m = Math.floor((data.uptime_seconds % 3600) / 60);
-  document.getElementById('uptime').textContent = `${h}h ${m}m`;
+  document.getElementById('uptime').textContent = `${h}h${m}m`;
 }
 
 async function refreshConversations() {
@@ -647,21 +805,21 @@ async function refreshConversations() {
   const data = await res.json();
   const el = document.getElementById('conversations');
   if (data.conversations.length === 0) {
-    el.innerHTML = '<div style="color:#64748b">Chưa có hội thoại nào.</div>';
+    el.innerHTML = '<div class="empty-state">-- chưa có hội thoại nào --</div>';
     return;
   }
   el.innerHTML = data.conversations.map(c => `
     <div class="conv-item">
       <div class="conv-meta">
         <strong>${escapeHtml(c.display_name)}</strong> (${c.chat_id})
-        <span class="badge">${c.type === 'photo' ? '🖼️ ảnh' : '💬 text'}</span>
+        <span class="badge">${c.type === 'photo' ? 'ẢNH' : 'TEXT'}</span>
       </div>
       <div class="conv-meta">
-        Gửi lúc ${c.sent_at} · Bot nhận lúc ${c.received_at} · Bot trả lời lúc ${c.responded_at}
+        gửi ${c.sent_at} · nhận ${c.received_at} · trả lời ${c.responded_at}
         <span class="badge">${c.duration}s</span>
       </div>
-      <div class="conv-user">👤 ${escapeHtml(c.user_text)}</div>
-      <div class="conv-bot">🤖 ${escapeHtml(c.bot_reply)}</div>
+      <div class="conv-user">&gt; ${escapeHtml(c.user_text)}</div>
+      <div class="conv-bot">${escapeHtml(c.bot_reply)}</div>
     </div>
   `).join('');
 }
@@ -693,7 +851,7 @@ function renderScheduleEditor() {
       <div id="day-${day}">
         ${(currentSchedule[day] || []).map((p, i) => periodRowHtml(day, i, p)).join('')}
       </div>
-      <button class="btn secondary" onclick="addPeriod('${day}')" style="font-size:12px;padding:4px 10px">+ Thêm tiết</button>
+      <button class="btn secondary" onclick="addPeriod('${day}')" style="font-size:11px;padding:4px 10px">+ thêm tiết</button>
     </div>
   `).join('');
 }
@@ -702,7 +860,7 @@ function periodRowHtml(day, i, p) {
   return `
     <div class="period-row">
       <input type="time" value="${p.start || ''}" onchange="updatePeriod('${day}',${i},'start',this.value)">
-      <span>-</span>
+      <span style="color:var(--dim)">–</span>
       <input type="time" value="${p.end || ''}" onchange="updatePeriod('${day}',${i},'end',this.value)">
       <input type="text" class="subject" placeholder="Môn học" value="${p.subject || ''}" onchange="updatePeriod('${day}',${i},'subject',this.value)">
       <button class="btn danger" onclick="removePeriod('${day}',${i})">✕</button>
@@ -746,11 +904,12 @@ async function saveSettings() {
   });
   const statusEl = document.getElementById('save-status');
   if (res.ok) {
-    statusEl.textContent = '✓ Đã lưu!';
+    statusEl.textContent = '✓ đã lưu';
+    statusEl.style.color = 'var(--ok)';
     setTimeout(() => statusEl.textContent = '', 2000);
   } else {
-    statusEl.textContent = '✗ Lỗi khi lưu';
-    statusEl.style.color = '#f87171';
+    statusEl.textContent = '✗ lỗi khi lưu';
+    statusEl.style.color = 'var(--err)';
   }
 }
 

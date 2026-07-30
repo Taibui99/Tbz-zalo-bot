@@ -27,6 +27,9 @@ DEFAULT_DATA = {
     },
     # schedule: { "Mon": [{"start": "07:00", "end": "07:45", "subject": "Toán"}, ...], ... }
     "schedule": {"Mon": [], "Tue": [], "Wed": [], "Thu": [], "Fri": [], "Sat": [], "Sun": []},
+    # sticker_library: { "vui": "d063f44dc80821567819", "buon": "...", ... } - mood key
+    # bằng tiếng Việt không dấu, để Gemini chọn qua function calling
+    "sticker_library": {},
     # đánh dấu đã gửi thông báo nào hôm nay rồi, để không gửi lặp lại (reset mỗi ngày mới)
     "_last_sent_date": None,
     "_sent_today": [],  # danh sách các "key" thông báo đã gửi trong ngày hôm nay
