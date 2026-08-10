@@ -17,11 +17,38 @@ import weather
 WEEKDAY_KEYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 WEEKDAY_VI = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
 
+# Chặn hai scheduler task trong cùng process cùng chạy phần morning greeting.
+# Bình thường FastAPI chỉ tạo một task, nhưng guard này bảo vệ khi startup/lifecycle
+# bị kích hoạt nhiều lần trong cùng process.
+_morning_lock = asyncio.Lock()
+_scheduler_started = False
+
 
 def _reset_if_new_day(data: dict, today_str: str):
     if data.get("_last_sent_date") != today_str:
         data["_last_sent_date"] = today_str
         data["_sent_today"] = []
+
+
+def _get_morning_summary(data: dict, today_str: str, lat, lon, log_fn) -> str:
+    """Lấy thời tiết tối đa một lần/ngày cho lời chào buổi sáng.
+
+    Kết quả được lưu cùng ngày để nếu gửi Zalo lỗi sau đó, scheduler không gọi
+    Open-Meteo lại ở phút kế tiếp.
+    """
+    cached = data.get("_morning_weather", {})
+    if cached.get("date") == today_str and cached.get("summary"):
+        return cached["summary"]
+
+    log_fn(f"🌤️ [weather] gọi Open-Meteo một lần cho ngày {today_str}")
+    summary = weather.get_weather_summary(lat, lon)
+    data["_morning_weather"] = {
+        "date": today_str,
+        "summary": summary,
+    }
+    # Lưu ngay sau khi request hoàn tất để tránh request lặp nếu lần gửi Zalo lỗi.
+    storage.save_data(data)
+    return summary
 
 
 async def _check_and_send(bot: Bot, vn_now_fn, log_fn):
@@ -44,31 +71,48 @@ async def _check_and_send(bot: Bot, vn_now_fn, log_fn):
 
     if not owner_chat_id:
         storage.save_data(data)
-        return  # chưa cài đặt chat_id thì không gửi gì cả
+        return
 
     changed = False
 
     # 1) Chào buổi sáng + thời tiết
     if morning.get("enabled") and morning.get("time") == current_hm:
-        key = f"morning_{today_str}"
-        if key not in data["_sent_today"]:
-            loc = data.get("location", {})
-            summary = await asyncio.to_thread(weather.get_weather_summary, loc.get("lat"), loc.get("lon"))
-            weekday_vi = WEEKDAY_VI[now.weekday()]
-            text = (
-                f"☀️ Chào buổi sáng! Hôm nay là {weekday_vi}, {now.strftime('%d/%m/%Y')}.\n"
-                f"Thời tiết ở {loc.get('name', 'chỗ bro')} hiện tại: {summary}.\n"
-                f"Chúc bro 1 ngày học tập hiệu quả! 📚"
-            )
-            try:
-                await bot.send_message(owner_chat_id, text)
-                log_fn(f"☀️ Đã gửi chào buổi sáng cho {owner_chat_id}")
-            except Exception as e:
-                log_fn(f"⚠️  Lỗi gửi chào buổi sáng: {e}")
-            data["_sent_today"].append(key)
-            changed = True
+        async with _morning_lock:
+            # Reload sau khi lấy lock để một task khác trong cùng process không
+            # dùng snapshot cũ và gọi weather lần thứ hai.
+            data = storage.load_data()
+            _reset_if_new_day(data, today_str)
+
+            key = f"morning_{today_str}"
+            if key not in data["_sent_today"]:
+                loc = data.get("location", {})
+                summary = await asyncio.to_thread(
+                    _get_morning_summary,
+                    data,
+                    today_str,
+                    loc.get("lat"),
+                    loc.get("lon"),
+                    log_fn,
+                )
+                weekday_vi = WEEKDAY_VI[now.weekday()]
+                text = (
+                    f"☀️ Chào buổi sáng! Hôm nay là {weekday_vi}, {now.strftime('%d/%m/%Y')}.\n"
+                    f"Thời tiết ở {loc.get('name', 'chỗ bro')} hiện tại: {summary}.\n"
+                    f"Chúc bro 1 ngày học tập hiệu quả! 📚"
+                )
+                try:
+                    await bot.send_message(owner_chat_id, text)
+                    log_fn(f"☀️ Đã gửi chào buổi sáng cho {owner_chat_id}")
+                    data["_sent_today"].append(key)
+                    storage.save_data(data)
+                except Exception as e:
+                    # Không gọi lại weather ở phút kế tiếp: summary đã được lưu
+                    # theo ngày trong _morning_weather.
+                    log_fn(f"⚠️ Lỗi gửi chào buổi sáng: {e}")
 
     # 2) Báo tiết học tiếp theo khi 1 tiết vừa kết thúc
+    data = storage.load_data()
+    _reset_if_new_day(data, today_str)
     weekday_key = WEEKDAY_KEYS[now.weekday()]
     periods = data.get("schedule", {}).get(weekday_key, [])
     for i, period in enumerate(periods):
@@ -87,17 +131,20 @@ async def _check_and_send(bot: Bot, vn_now_fn, log_fn):
                 try:
                     await bot.send_message(owner_chat_id, text)
                     log_fn(f"🔔 Đã báo hết tiết cho {owner_chat_id}")
+                    data["_sent_today"].append(key)
+                    storage.save_data(data)
                 except Exception as e:
                     log_fn(f"⚠️  Lỗi gửi báo hết tiết: {e}")
-                data["_sent_today"].append(key)
-                changed = True
-
-    if changed:
-        storage.save_data(data)
 
 
 async def run_scheduler(bot_token: str, vn_now_fn, log_fn):
     """Vòng lặp chạy mãi, kiểm tra mỗi 60 giây."""
+    global _scheduler_started
+    if _scheduler_started:
+        log_fn("⚠️ Scheduler đã chạy trong process này, bỏ qua lần khởi động trùng.")
+        return
+
+    _scheduler_started = True
     bot = Bot(bot_token)
     log_fn("⏰ Scheduler (chào buổi sáng + thời khóa biểu) đã khởi động")
     while True:
