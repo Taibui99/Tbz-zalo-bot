@@ -41,13 +41,13 @@ def vn_now() -> datetime:
 # ============================================================
 # CẤU HÌNH — lấy từ biến môi trường (set trong Render dashboard)
 # ============================================================
-BOT_TOKEN = os.environ.get("ZALO_BOT_TOKEN", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+BOT_TOKEN = os.environ.get("ZALO_BOT_TOKEN", "").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 # Grok qua API xAI TRỰC TIẾP (api.x.ai/v1, OpenAI-compatible) - dùng cho TRÒ
 # CHUYỆN TEXT, mọi tác vụ (tạo ảnh, phân tích ảnh, voice, sticker) vẫn do
 # Gemini/nền tảng khác đảm nhiệm. Để trống GROK_API_KEY thì bot dùng Gemini.
-GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
+GROK_API_KEY = os.environ.get("GROK_API_KEY", "").strip()
 GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4.6")
 GROK_API_BASE = os.environ.get("GROK_API_BASE", "https://api.x.ai/v1")
 # Danh sách model tạo ảnh, thử lần lượt theo thứ tự. gemini-2.5-flash-image
