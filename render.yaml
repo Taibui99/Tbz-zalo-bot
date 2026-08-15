@@ -3,7 +3,7 @@ services:
     name: zalo-bot
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ZALO_BOT_TOKEN
@@ -12,3 +12,7 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-flash-latest
+      - key: IMAGE_GEN_MODEL
+        value: gemini-3-pro-image
+      - key: ZALO_VOICE
+        value: vi-VN-HoaiMyNeural

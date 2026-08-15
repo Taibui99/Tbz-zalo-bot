@@ -1,5 +1,8 @@
-python-zalo-bot
+python-zalo-bot>=0.1.9
 google-genai
 requests
 fastapi
 uvicorn
+edge-tts
+gTTS
+imageio-ffmpeg

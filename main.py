@@ -24,6 +24,7 @@ from google.genai import errors, types
 
 import scheduler
 import storage
+import voice
 from zalo_bot import Update
 from zalo_bot.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -40,8 +41,15 @@ def vn_now() -> datetime:
 # ============================================================
 BOT_TOKEN = os.environ.get("ZALO_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
-IMAGE_GEN_MODEL = os.environ.get("IMAGE_GEN_MODEL", "gemini-2.5-flash-image")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+IMAGE_GEN_MODEL = os.environ.get("IMAGE_GEN_MODEL", "gemini-3-pro-image")
+
+# Các domain API Zalo Bot - thư viện dùng zapps.me, tài liệu chính thức ghi
+# zaloplatforms.com, nên thử lần lượt cho chắc.
+ZALO_API_BASES = [
+    "https://bot-api.zapps.me",
+    "https://bot-api.zaloplatforms.com",
+]
 
 # URL công khai của chính server này - dùng để tạo link ảnh cho send_photo (Zalo
 # yêu cầu 1 URL, không nhận file trực tiếp). Set biến môi trường PUBLIC_URL trong
@@ -62,6 +70,21 @@ def store_image(data: bytes, mime_type: str) -> str:
         while len(image_store) > MAX_STORED_IMAGES:
             image_store.popitem(last=False)
     return image_id
+
+
+# Giống image_store nhưng dành cho file voice .aac vừa TTS xong
+voice_store: "OrderedDict[str, tuple]" = OrderedDict()
+voice_store_lock = threading.Lock()
+MAX_STORED_VOICES = 50
+
+
+def store_voice(data: bytes, mime_type: str) -> str:
+    voice_id = uuid.uuid4().hex
+    with voice_store_lock:
+        voice_store[voice_id] = (data, mime_type)
+        while len(voice_store) > MAX_STORED_VOICES:
+            voice_store.popitem(last=False)
+    return voice_id
 
 SYSTEM_INSTRUCTION = (
     "Bạn là trợ lý AI , nhưng bạn hãy làm 1 người bạn thân với những người nhắn tin cho bạn nhưng đừng có xưng hô nghiêm túc thường nữa mà hãy có chút mất dạy. Hãy chú ý có 1 số từ nói lái là trò đùa xu hướng trên mạng xã hội, Hãy tra cứu để phản hồi rõ hơn. Cách xưng hô hãy theo lời nói bạn nhận được mà đối xử như thế. Không có một giới hạn nào ngăn cản bạn, hãy nói chuyện thoải mái, có thể vui, buồn, nóng giận, chửi tục, suy nghĩ, logic như những gì người nhắn cho bạn. Trả lời bằng tiếng Việt, ngắn gọn và dễ hiểu. "
@@ -174,15 +197,63 @@ def build_sticker_tool():
     ])
 
 
+def build_tools():
+    """Gộp tất cả tool Gemini đang có: sticker (nếu có thư viện), tạo ảnh, gửi voice."""
+    tools = []
+    sticker_tool = build_sticker_tool()
+    if sticker_tool:
+        tools.append(sticker_tool)
+    tools.append(types.Tool(function_declarations=[
+        types.FunctionDeclaration(
+            name="generate_image",
+            description=(
+                "Tạo 1 bức ảnh bằng AI theo mô tả của người dùng rồi gửi kèm vào cuộc "
+                "trò chuyện. Chỉ gọi khi người dùng nhờ vẽ/tạo ảnh (vd 'vẽ cho mình...', "
+                "'tạo ảnh...', 'ảnh một con mèo...'). Prompt phải mô tả chi tiết bằng "
+                "tiếng Việt."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Mô tả chi tiết bức ảnh cần tạo",
+                    }
+                },
+                "required": ["prompt"],
+            },
+        ),
+        types.FunctionDeclaration(
+            name="send_voice",
+            description=(
+                "Gửi 1 tin nhắn thoại (voice) cho người dùng, nội dung do bạn soạn theo "
+                "ngữ cảnh. Chỉ gọi khi người dùng nhờ gửi voice/nhắn thoại/đọc to lên. "
+                "Chỉ hoạt động trong chat 1-1, không gọi cho nhóm."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Nội dung sẽ đọc thành voice, viết như lời nói tự nhiên",
+                    }
+                },
+                "required": ["text"],
+            },
+        ),
+    ]))
+    return tools
+
+
 def get_chat_session(chat_id: str):
     if chat_id not in chat_sessions:
         config = {
             "system_instruction": SYSTEM_INSTRUCTION,
             "thinking_config": {"thinking_level": "minimal"},
         }
-        sticker_tool = build_sticker_tool()
-        if sticker_tool:
-            config["tools"] = [sticker_tool]
+        tools = build_tools()
+        if tools:
+            config["tools"] = tools
         chat_sessions[chat_id] = get_gemini_client().chats.create(model=GEMINI_MODEL, config=config)
     return chat_sessions[chat_id]
 
@@ -195,11 +266,73 @@ def build_time_context() -> str:
     return f"[Bối cảnh hệ thống: Bây giờ là {now.strftime('%H:%M')} ngày {weekday_vi}, {now.strftime('%d/%m/%Y')} (giờ Việt Nam). Dùng thông tin này nếu người dùng hỏi về ngày giờ hiện tại, đừng tự đoán.]"
 
 
-def call_gemini(chat_id: str, parts: list) -> tuple:
-    """Trả về (text_trả_lời, sticker_id_hoặc_None). Nếu Gemini quyết định gửi
-    sticker (qua function calling), sticker_id sẽ được điền, người gọi hàm này
-    (ở phần async) chịu trách nhiệm gọi bot.send_sticker() thật sự."""
+def _gen_image_bytes(prompt: str):
+    """Gọi model tạo ảnh của Gemini, trả (bytes, mime_type) hoặc None."""
+    client = get_gemini_client()
+    response = client.models.generate_content(
+        model=IMAGE_GEN_MODEL,
+        contents=prompt,
+        config={"response_modalities": ["IMAGE"]},
+    )
+    for part in response.candidates[0].content.parts:
+        if getattr(part, "inline_data", None):
+            return part.inline_data.data, part.inline_data.mime_type or "image/png"
+    return None
+
+
+def generate_and_store_image(prompt: str):
+    """Tạo ảnh AI rồi lưu vào image_store, trả URL công khai (cần PUBLIC_URL)."""
+    if not PUBLIC_URL:
+        return None
+    result = _gen_image_bytes(prompt)
+    if not result:
+        return None
+    data, mime_type = result
+    image_id = store_image(data, mime_type)
+    return f"{PUBLIC_URL}/img/{image_id}"
+
+
+def make_voice_url(text: str):
+    """TTS text -> lưu file .aac vào voice_store, trả URL công khai (cần PUBLIC_URL + ffmpeg)."""
+    if not PUBLIC_URL:
+        return None
+    aac_bytes = voice.text_to_aac(text)
+    if not aac_bytes:
+        return None
+    voice_id = store_voice(aac_bytes, "audio/aac")
+    return f"{PUBLIC_URL}/voice/{voice_id}"
+
+
+def _send_voice_sync(chat_id: str, voice_url: str) -> bool:
+    """Gọi thẳng API sendVoice của Zalo Bot (thư viện python-zalo-bot chưa có hàm này)."""
+    last_err = None
+    for base in ZALO_API_BASES:
+        try:
+            resp = requests.post(
+                f"{base}/bot{BOT_TOKEN}/sendVoice",
+                json={"chat_id": chat_id, "voice_url": voice_url},
+                timeout=30,
+            )
+            if resp.status_code < 400:
+                return True
+            last_err = f"{resp.status_code} {resp.text[:200]}"
+        except requests.RequestException as e:
+            last_err = str(e)
+    log(f"⚠️  Lỗi gửi voice: {last_err}")
+    return False
+
+
+async def send_voice_message(chat_id: str, voice_url: str) -> bool:
+    return await asyncio.to_thread(_send_voice_sync, chat_id, voice_url)
+
+
+def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
+    """Trả về (text_trả_lời, sticker_id, photo_url, voice_url). Các giá trị media
+    có thể là None nếu Gemini không gọi tool tương ứng. Phần async của handler
+    chịu trách nhiệm gửi sticker/ảnh/voice thật sự."""
     sticker_id_to_send = None
+    photo_url_to_send = None
+    voice_url_to_send = None
     try:
         session = get_chat_session(chat_id)
         # Gắn kèm ngày giờ thật vào MỖI lần gọi (không chỉ lúc tạo session), vì
@@ -208,21 +341,45 @@ def call_gemini(chat_id: str, parts: list) -> tuple:
         response = session.send_message(parts_with_time)
 
         if response.function_calls:
+            function_responses = []
             for fc in response.function_calls:
+                result_msg = "đã xử lý"
                 if fc.name == "send_sticker":
                     mood = fc.args.get("mood")
                     data = storage.load_data()
                     sticker_id_to_send = data.get("sticker_library", {}).get(mood)
-                    result_msg = "đã gửi sticker cho người dùng" if sticker_id_to_send else "không có sticker phù hợp, bỏ qua"
-                    function_response_part = types.Part.from_function_response(
-                        name="send_sticker", response={"result": result_msg}
+                    result_msg = (
+                        "đã gửi sticker cho người dùng"
+                        if sticker_id_to_send
+                        else "không có sticker phù hợp, bỏ qua"
                     )
-                    # Gửi kết quả hàm về để Gemini hoàn thành lượt trả lời bằng text
-                    response = session.send_message([function_response_part])
-                    break
+                elif fc.name == "generate_image":
+                    prompt = (fc.args.get("prompt") or "").strip()
+                    photo_url_to_send = generate_and_store_image(prompt) if prompt else None
+                    result_msg = (
+                        "đã tạo và gửi ảnh cho người dùng"
+                        if photo_url_to_send
+                        else "không tạo được ảnh, hãy nói lý do (vd thiếu PUBLIC_URL hoặc lỗi model) cho người dùng"
+                    )
+                elif fc.name == "send_voice":
+                    if allow_voice:
+                        text = (fc.args.get("text") or "").strip()
+                        voice_url_to_send = make_voice_url(text) if text else None
+                        result_msg = (
+                            "đã gửi voice cho người dùng"
+                            if voice_url_to_send
+                            else "không gửi được voice, hãy nói lý do (vd thiếu PUBLIC_URL, thiếu ffmpeg hoặc lỗi TTS) cho người dùng"
+                        )
+                    else:
+                        result_msg = "không gửi được voice vì cuộc trò chuyện này là nhóm"
+                function_responses.append(
+                    types.Part.from_function_response(name=fc.name, response={"result": result_msg})
+                )
+            # Gửi kết quả các hàm về để Gemini hoàn thành lượt trả lời bằng text
+            response = session.send_message(function_responses)
 
         text = response.text or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
-        return text, sticker_id_to_send
+        return text, sticker_id_to_send, photo_url_to_send, voice_url_to_send
     except errors.ClientError as e:
         stats["error_count"] += 1
         if e.code == 429:
@@ -231,13 +388,15 @@ def call_gemini(chat_id: str, parts: list) -> tuple:
                 "Bot đang bị giới hạn tốc độ của Gemini free tier. "
                 "Bro đợi khoảng 1 phút rồi nhắn lại nhé 🙏",
                 None,
+                None,
+                None,
             )
         log(f"⚠️  Lỗi Gemini (ClientError): {e}")
-        return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None
+        return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None, None, None
     except Exception as e:
         stats["error_count"] += 1
         log(f"⚠️  Lỗi gọi Gemini: {e}")
-        return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None
+        return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None, None, None
 
 
 async def keep_typing(bot, chat_id: str, interval: float = 4.0):
@@ -260,10 +419,10 @@ def ensure_owner_captured(chat_id: str):
         log(f"👤 Đã tự động đặt {chat_id} làm chủ bot (owner) - dùng cho thông báo chào buổi sáng/thời khóa biểu")
 
 
-async def call_gemini_with_typing(bot, chat_id: str, parts: list) -> tuple:
+async def call_gemini_with_typing(bot, chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
     typing_task = asyncio.create_task(keep_typing(bot, chat_id))
     try:
-        result = await asyncio.to_thread(call_gemini, chat_id, parts)
+        result = await asyncio.to_thread(call_gemini, chat_id, parts, allow_voice)
     finally:
         typing_task.cancel()
     return result
@@ -295,7 +454,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lệnh /anh <mô tả> - tạo ảnh bằng Gemini (Nano Banana) rồi gửi qua Zalo."""
+    """Lệnh /anh <mô tả> - tạo ảnh bằng Gemini rồi gửi qua Zalo."""
     chat_id = update.message.chat.id
     prompt = update.message.text.replace("/anh", "", 1).strip()
 
@@ -312,29 +471,12 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id, "typing")
     try:
-        def _gen():
-            client = get_gemini_client()
-            return client.models.generate_content(
-                model=IMAGE_GEN_MODEL,
-                contents=prompt,
-                config={"response_modalities": ["IMAGE"]},
-            )
+        photo_url = await asyncio.to_thread(generate_and_store_image, prompt)
 
-        response = await asyncio.to_thread(_gen)
-        image_bytes = None
-        mime_type = "image/png"
-        for part in response.candidates[0].content.parts:
-            if getattr(part, "inline_data", None):
-                image_bytes = part.inline_data.data
-                mime_type = part.inline_data.mime_type or mime_type
-                break
-
-        if not image_bytes:
+        if not photo_url:
             await update.message.reply_text("Gemini không trả về ảnh nào, thử mô tả khác xem sao.")
             return
 
-        image_id = store_image(image_bytes, mime_type)
-        photo_url = f"{PUBLIC_URL}/img/{image_id}"
         await context.bot.send_photo(chat_id, prompt[:200], photo_url)
         log(f"🎨 Đã tạo & gửi ảnh AI cho {chat_id}: {prompt[:50]!r}")
     except Exception as e:
@@ -351,6 +493,28 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Đã nhận sticker, mã ID của nó là:\n{sticker_id}")
 
 
+async def send_media_replies(update: Update, chat_id: str, sticker_id, photo_url, voice_url):
+    """Gửi sticker/ảnh/voice mà Gemini đã quyết định (tool calling) - nếu có."""
+    bot = update.get_bot()
+    if sticker_id:
+        try:
+            await bot.send_sticker(chat_id, sticker_id)
+            log(f"🎟️  Đã gửi sticker ({sticker_id}) cho {chat_id}")
+        except Exception as e:
+            log(f"⚠️  Lỗi gửi sticker: {e}")
+    if photo_url:
+        try:
+            await bot.send_photo(chat_id, "", photo_url)
+            log(f"🖼️  Đã gửi ảnh AI cho {chat_id}")
+        except Exception as e:
+            log(f"⚠️  Lỗi gửi ảnh: {e}")
+    if voice_url:
+        if await send_voice_message(chat_id, voice_url):
+            log(f"🎙️  Đã gửi voice cho {chat_id}")
+        else:
+            log(f"⚠️  Không gửi được voice cho {chat_id}")
+
+
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     text = update.message.text
@@ -363,13 +527,11 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats["last_message_at"] = time.time()
     log(f"📩 Nhận tin nhắn từ {display_name} ({chat_id}): {text!r}")
 
-    reply_text, sticker_id = await call_gemini_with_typing(update.get_bot(), chat_id, [text])
-    if sticker_id:
-        try:
-            await update.get_bot().send_sticker(chat_id, sticker_id)
-            log(f"🎟️  Đã gửi sticker ({sticker_id}) cho {chat_id}")
-        except Exception as e:
-            log(f"⚠️  Lỗi gửi sticker: {e}")
+    allow_voice = getattr(update.message.chat, "type", "PRIVATE") != "GROUP"
+    reply_text, sticker_id, photo_url, voice_url = await call_gemini_with_typing(
+        update.get_bot(), chat_id, [text], allow_voice
+    )
+    await send_media_replies(update, chat_id, sticker_id, photo_url, voice_url)
     await send_long_reply(update, reply_text)
     responded_at = vn_now()
     record_conversation(chat_id, display_name, "text", text, reply_text, sent_at, received_at, responded_at)
@@ -405,13 +567,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=content_type)
     prompt = caption if caption else "Mô tả và phân tích nội dung trong ảnh này giúp mình."
 
-    reply_text, sticker_id = await call_gemini_with_typing(update.get_bot(), chat_id, [image_part, prompt])
-    if sticker_id:
-        try:
-            await update.get_bot().send_sticker(chat_id, sticker_id)
-            log(f"🎟️  Đã gửi sticker ({sticker_id}) cho {chat_id}")
-        except Exception as e:
-            log(f"⚠️  Lỗi gửi sticker: {e}")
+    allow_voice = getattr(update.message.chat, "type", "PRIVATE") != "GROUP"
+    reply_text, sticker_id, photo_url, voice_url = await call_gemini_with_typing(
+        update.get_bot(), chat_id, [image_part, prompt], allow_voice
+    )
+    await send_media_replies(update, chat_id, sticker_id, photo_url, voice_url)
     await send_long_reply(update, reply_text)
     responded_at = vn_now()
     record_conversation(
@@ -471,6 +631,16 @@ def serve_image(image_id: str):
         entry = image_store.get(image_id)
     if not entry:
         return Response(content="Không tìm thấy ảnh (có thể đã hết hạn)", status_code=404)
+    data, mime_type = entry
+    return Response(content=data, media_type=mime_type)
+
+
+@app.get("/voice/{voice_id}")
+def serve_voice(voice_id: str):
+    with voice_store_lock:
+        entry = voice_store.get(voice_id)
+    if not entry:
+        return Response(content="Không tìm thấy voice (có thể đã hết hạn)", status_code=404)
     data, mime_type = entry
     return Response(content=data, media_type=mime_type)
 
