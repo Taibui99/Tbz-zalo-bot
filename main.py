@@ -541,6 +541,18 @@ def _send_sticker_sync(chat_id: str, sticker_id: str) -> bool:
     return False
 
 
+def _extract_response_text(response) -> str:
+    """Trích text từ response Gemini một cách chắc chắn: gom mọi part có text
+    (bỏ qua part thought), không dựa vào property .text vì một số model trả
+    thought-only hoặc trả text trong nhiều part."""
+    texts = []
+    for candidate in (response.candidates or []):
+        for part in (candidate.content.parts if candidate.content else []):
+            if getattr(part, "text", None):
+                texts.append(part.text)
+    return "\n".join(texts).strip()
+
+
 def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
     """Trả về (text_trả_lời, sticker_id, photo_url, voice_url). Các giá trị media
     có thể là None nếu Gemini không gọi tool tương ứng. Phần async của handler
@@ -568,7 +580,21 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
             # Gửi kết quả các hàm về để Gemini hoàn thành lượt trả lời bằng text
             response = session.send_message(function_responses)
 
-        text = response.text or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
+        text = _extract_response_text(response)
+        if not text:
+            # Chẩn đoán: log finish_reason + loại part để biết vì sao Gemini
+            # trả rỗng (safety block / thought-only / model lạ).
+            try:
+                cand = response.candidates[0] if response.candidates else None
+                fr = getattr(cand, "finish_reason", None)
+                part_types = [
+                    getattr(p, "type", None) or type(p).__name__
+                    for p in (cand.content.parts if cand and cand.content else [])
+                ]
+                log(f"⚠️  Gemini trả text RỖNG - finish_reason={fr}, part_types={part_types}")
+            except Exception as e:
+                log(f"⚠️  Gemini trả text rỗng (không chẩn đoán được: {e})")
+            text = "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
         return text, sticker_id_to_send, photo_url_to_send, voice_url_to_send
     except errors.ClientError as e:
         stats["error_count"] += 1
