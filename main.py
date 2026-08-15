@@ -350,6 +350,20 @@ def build_openai_tools() -> list:
     return tools
 
 
+def build_responses_tools() -> list:
+    """Tools theo format Responses API (xAI dùng /responses): phẳng, không bọc
+    thêm khóa "function" như chat completions."""
+    return [
+        {
+            "type": "function",
+            "name": t["function"]["name"],
+            "description": t["function"]["description"],
+            "parameters": t["function"]["parameters"],
+        }
+        for t in build_openai_tools()
+    ]
+
+
 def execute_tool(name: str, args: dict, allow_voice: bool) -> tuple:
     """Chạy 1 tool (sticker/ảnh/voice) - dùng chung cho Gemini lẫn Grok.
     Trả (result_msg, sticker_id, photo_url, voice_url)."""
@@ -658,7 +672,7 @@ def get_grok_session(chat_id: str) -> list:
 
 
 def call_grok(chat_id: str, user_text: str, allow_voice: bool = True) -> tuple:
-    """Trò chuyện text qua Grok (OpenRouter, OpenAI-compatible) kèm tool calling.
+    """Trò chuyện text qua Grok (xAI Responses API /responses) kèm tool calling.
     Trả (text, sticker_id, photo_url, voice_url). Ném exception khi lỗi để caller
     fallback sang Gemini - mọi tác vụ nền (tạo ảnh, TTS) vẫn như cũ."""
     import json as _json
@@ -669,53 +683,43 @@ def call_grok(chat_id: str, user_text: str, allow_voice: bool = True) -> tuple:
     sticker_id_to_send = None
     photo_url_to_send = None
     voice_url_to_send = None
+    tools = build_responses_tools()
 
+    input_items = list(messages)
     for _ in range(4):  # tối đa 4 vòng tool calling
-        payload = {
-            "model": GROK_MODEL,
-            "messages": messages,
-            "tools": build_openai_tools(),
-            "tool_choice": "auto",
-        }
         resp = requests.post(
-            f"{GROK_API_BASE}/chat/completions",
+            f"{GROK_API_BASE}/responses",
             headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
-            json=payload,
+            json={"model": GROK_MODEL, "input": input_items, "tools": tools},
             timeout=60,
         )
         resp.raise_for_status()
-        data = resp.json()
-        msg = data["choices"][0]["message"]
-        if msg.get("tool_calls"):
-            messages.append({
-                "role": "assistant",
-                "content": msg.get("content") or None,
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["function"]["name"],
-                            "arguments": tc["function"]["arguments"],
-                        },
-                    }
-                    for tc in msg["tool_calls"]
-                ],
-            })
-            for tc in msg["tool_calls"]:
-                name = tc["function"]["name"]
+        output = resp.json().get("output", [])
+
+        tool_calls = [o for o in output if o.get("type") == "function_call"]
+        if tool_calls:
+            input_items = list(input_items) + list(output)
+            for tc in tool_calls:
                 try:
-                    args = _json.loads(tc["function"]["arguments"] or "{}")
+                    args = _json.loads(tc.get("arguments") or "{}")
                 except _json.JSONDecodeError:
                     args = {}
-                result_msg, s_id, p_url, v_url = execute_tool(name, args, allow_voice)
+                result_msg, s_id, p_url, v_url = execute_tool(tc.get("name"), args, allow_voice)
                 sticker_id_to_send = sticker_id_to_send or s_id
                 photo_url_to_send = photo_url_to_send or p_url
                 voice_url_to_send = voice_url_to_send or v_url
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_msg})
+                input_items.append(
+                    {"type": "function_call_output", "call_id": tc.get("call_id"), "output": result_msg}
+                )
             continue
 
-        text = (msg.get("content") or "").strip() or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
+        texts = []
+        for item in output:
+            if item.get("type") == "message":
+                for part in item.get("content", []):
+                    if part.get("type") == "output_text" and part.get("text"):
+                        texts.append(part["text"])
+        text = "\n".join(texts).strip() or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
         messages.append({"role": "assistant", "content": text})
         # cắt lịch sử cho khỏi phình, luôn giữ dòng system đầu
         if len(messages) > MAX_GROK_HISTORY + 1:
