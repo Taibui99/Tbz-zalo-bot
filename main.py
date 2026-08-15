@@ -44,12 +44,6 @@ def vn_now() -> datetime:
 BOT_TOKEN = os.environ.get("ZALO_BOT_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-# Grok qua API xAI TRỰC TIẾP (api.x.ai/v1, OpenAI-compatible) - dùng cho TRÒ
-# CHUYỆN TEXT, mọi tác vụ (tạo ảnh, phân tích ảnh, voice, sticker) vẫn do
-# Gemini/nền tảng khác đảm nhiệm. Để trống GROK_API_KEY thì bot dùng Gemini.
-GROK_API_KEY = os.environ.get("GROK_API_KEY", "").strip()
-GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4.6")
-GROK_API_BASE = os.environ.get("GROK_API_BASE", "https://api.x.ai/v1")
 # Danh sách model tạo ảnh, thử lần lượt theo thứ tự. gemini-2.5-flash-image
 # (Nano Banana) là model DUY NHẤT có free tier - các model Pro chỉ chạy khi
 # tài khoản trả phí, nên để nó đầu danh sách.
@@ -194,7 +188,7 @@ def get_gemini_client():
 chat_sessions = {}
 
 
-# Mô tả tool dùng chung cho cả Gemini (google-genai) lẫn Grok (OpenAI format)
+# Mô tả tool gửi sticker cho Gemini
 STICKER_TOOL_DESC = (
     "Gửi 1 sticker Zalo. Gọi hàm này theo NGỮ CẢNH: khi người dùng vui vẻ, "
     "đùa giỡn, kể chuyện buồn, chào hỏi, tạm biệt, cảm ơn, giận dỗi, bất ngờ, "
@@ -294,84 +288,8 @@ def build_tools():
     return tools
 
 
-def build_openai_tools() -> list:
-    """Các tool trên dưới dạng OpenAI format (dùng cho Grok qua OpenRouter)."""
-    tools = []
-    moods = sticker_moods()
-    if moods:
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "send_sticker",
-                "description": STICKER_TOOL_DESC,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "mood": {
-                            "type": "string",
-                            "enum": moods,
-                            "description": "Cảm xúc/ngữ cảnh phù hợp nhất trong danh sách có sẵn",
-                        }
-                    },
-                    "required": ["mood"],
-                },
-            },
-        })
-    tools.extend([
-        {
-            "type": "function",
-            "function": {
-                "name": "generate_image",
-                "description": IMAGE_TOOL_DESC,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "Mô tả chi tiết bức ảnh cần tạo",
-                        }
-                    },
-                    "required": ["prompt"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "send_voice",
-                "description": VOICE_TOOL_DESC,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "text": {
-                            "type": "string",
-                            "description": "Nội dung sẽ đọc thành voice, viết như lời nói tự nhiên",
-                        }
-                    },
-                    "required": ["text"],
-                },
-            },
-        },
-    ])
-    return tools
-
-
-def build_responses_tools() -> list:
-    """Tools theo format Responses API (xAI dùng /responses): phẳng, không bọc
-    thêm khóa "function" như chat completions."""
-    return [
-        {
-            "type": "function",
-            "name": t["function"]["name"],
-            "description": t["function"]["description"],
-            "parameters": t["function"]["parameters"],
-        }
-        for t in build_openai_tools()
-    ]
-
-
 def execute_tool(name: str, args: dict, allow_voice: bool) -> tuple:
-    """Chạy 1 tool (sticker/ảnh/voice) - dùng chung cho Gemini lẫn Grok.
+    """Chạy 1 tool (sticker/ảnh/voice) cho Gemini.
     Trả (result_msg, sticker_id, photo_url, voice_url)."""
     sticker_id_to_send = None
     photo_url_to_send = None
@@ -666,94 +584,6 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
         return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None, None, None
 
 
-# ============================================================
-# GROK (OpenRouter - API kiểu OpenAI) - dùng cho TRÒ CHUYỆN TEXT
-# ============================================================
-grok_sessions: dict = {}  # chat_id -> list[dict] messages OpenAI format
-
-MAX_GROK_HISTORY = 24  # giữ tối đa 24 tin nhắn (ngoài system) để khỏi phình
-
-
-def get_grok_session(chat_id: str) -> list:
-    msgs = grok_sessions.get(chat_id)
-    if msgs is None:
-        msgs = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
-        grok_sessions[chat_id] = msgs
-    return msgs
-
-
-def call_grok(chat_id: str, user_text: str, allow_voice: bool = True) -> tuple:
-    """Trò chuyện text qua Grok (xAI Responses API /responses) kèm tool calling.
-    Trả (text, sticker_id, photo_url, voice_url). Ném exception khi lỗi để caller
-    fallback sang Gemini - mọi tác vụ nền (tạo ảnh, TTS) vẫn như cũ."""
-    import json as _json
-
-    messages = get_grok_session(chat_id)
-    messages.append({"role": "user", "content": f"{build_time_context()} {user_text}"})
-
-    sticker_id_to_send = None
-    photo_url_to_send = None
-    voice_url_to_send = None
-    tools = build_responses_tools()
-
-    input_items = list(messages)
-    for _ in range(4):  # tối đa 4 vòng tool calling
-        resp = requests.post(
-            f"{GROK_API_BASE}/responses",
-            headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
-            json={"model": GROK_MODEL, "input": input_items, "tools": tools},
-            timeout=60,
-        )
-        resp.raise_for_status()
-        output = resp.json().get("output", [])
-
-        tool_calls = [o for o in output if o.get("type") == "function_call"]
-        if tool_calls:
-            input_items = list(input_items) + list(output)
-            for tc in tool_calls:
-                try:
-                    args = _json.loads(tc.get("arguments") or "{}")
-                except _json.JSONDecodeError:
-                    args = {}
-                result_msg, s_id, p_url, v_url = execute_tool(tc.get("name"), args, allow_voice)
-                sticker_id_to_send = sticker_id_to_send or s_id
-                photo_url_to_send = photo_url_to_send or p_url
-                voice_url_to_send = voice_url_to_send or v_url
-                input_items.append(
-                    {"type": "function_call_output", "call_id": tc.get("call_id"), "output": result_msg}
-                )
-            continue
-
-        texts = []
-        for item in output:
-            if item.get("type") == "message":
-                for part in item.get("content", []):
-                    if part.get("type") == "output_text" and part.get("text"):
-                        texts.append(part["text"])
-        text = "\n".join(texts).strip() or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
-        messages.append({"role": "assistant", "content": text})
-        # cắt lịch sử cho khỏi phình, luôn giữ dòng system đầu
-        if len(messages) > MAX_GROK_HISTORY + 1:
-            grok_sessions[chat_id] = messages[:1] + messages[-(MAX_GROK_HISTORY):]
-        return text, sticker_id_to_send, photo_url_to_send, voice_url_to_send
-
-    return "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé.", sticker_id_to_send, photo_url_to_send, voice_url_to_send
-
-
-def call_chat_llm(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
-    """Điều phối LLM trò chuyện: Grok (nếu có key) cho chat text, fallback Gemini
-    khi lỗi/rate limit. parts chứa ảnh (không phải text thuần) thì luôn dùng Gemini
-    vì phân tích ảnh cần vision đáng tin cậy. Trả về tuple giống call_gemini."""
-    if GROK_API_KEY and all(isinstance(p, str) for p in parts):
-        user_text = "\n".join(parts)
-        try:
-            return call_grok(chat_id, user_text, allow_voice)
-        except Exception as e:
-            stats["error_count"] += 1
-            log(f"⚠️  Grok lỗi ({GROK_MODEL}): {e} - fallback sang Gemini")
-    return call_gemini(chat_id, parts, allow_voice)
-
-
 async def keep_typing(bot, chat_id: str, interval: float = 4.0):
     try:
         while True:
@@ -777,7 +607,7 @@ def ensure_owner_captured(chat_id: str):
 async def call_gemini_with_typing(bot, chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
     typing_task = asyncio.create_task(keep_typing(bot, chat_id))
     try:
-        result = await asyncio.to_thread(call_chat_llm, chat_id, parts, allow_voice)
+        result = await asyncio.to_thread(call_gemini, chat_id, parts, allow_voice)
     finally:
         typing_task.cancel()
     return result
@@ -805,7 +635,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     chat_sessions.pop(chat_id, None)
-    grok_sessions.pop(chat_id, None)
     await update.message.reply_text("Đã xoá ngữ cảnh cũ, bắt đầu cuộc trò chuyện mới nhé 🔄")
 
 
@@ -952,7 +781,6 @@ def run_bot_in_background():
 
     try:
         log(f"🌐 PUBLIC_URL = {PUBLIC_URL or '(CHƯA CÓ - ảnh/voice sẽ không gửi được)'}")
-        log(f"🤖 Grok: {'BẬT' if GROK_API_KEY else 'TẮT (dùng Gemini)'} - model {GROK_MODEL} @ {GROK_API_BASE}")
         app_zalo = ApplicationBuilder().token(BOT_TOKEN).build()
         app_zalo.add_handler(CommandHandler("start", start))
         app_zalo.add_handler(CommandHandler("reset", reset))
