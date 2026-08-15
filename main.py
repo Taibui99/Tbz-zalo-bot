@@ -65,8 +65,10 @@ ZALO_API_BASES = [
 
 # URL công khai của chính server này - dùng để tạo link ảnh cho send_photo (Zalo
 # yêu cầu 1 URL, không nhận file trực tiếp). Set biến môi trường PUBLIC_URL trong
-# Render = đúng domain Render cấp (vd https://tbz-zalo-bot.onrender.com)
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+# Render = đúng domain Render cấp (vd https://tbz-zalo-bot.onrender.com).
+# Nếu chưa set, tự động dùng RENDER_EXTERNAL_URL do Render cấp sẵn.
+PUBLIC_URL = os.environ.get("PUBLIC_URL") or os.environ.get("RENDER_EXTERNAL_URL") or ""
+PUBLIC_URL = PUBLIC_URL.rstrip("/")
 
 # Lưu ảnh AI vừa tạo trong RAM để phục vụ qua route /img/{id} - chỉ giữ tối đa
 # 50 ảnh gần nhất, ảnh cũ tự bị đẩy ra (không cần dọn dẹp thủ công)
@@ -105,7 +107,10 @@ SYSTEM_INSTRUCTION = (
     "gõ, chỉ là thông tin nền. Hãy để ý các mốc thời gian này xuyên suốt lịch sử "
     "trò chuyện: nếu người dùng hỏi về thời gian đã trôi qua giữa các lần nhắn "
     "trước đó (vd 'lúc nãy tôi hỏi gì', 'cách đây bao lâu', 'hôm qua mình nói gì'), "
-    "hãy so sánh các mốc thời gian đó để trả lời chính xác, đừng đoán mò."
+    "hãy so sánh các mốc thời gian đó để trả lời chính xác, đừng đoán mò. "
+    "Bạn có các tool gửi sticker, tạo ảnh và gửi voice: hãy dùng chúng theo ngữ cảnh "
+    "cuộc trò chuyện (vui thì sticker vui, tâm sự buồn thì sticker buồn, được nhờ vẽ ảnh "
+    "thì tạo ảnh...), đừng chỉ chờ người dùng nhờ."
 )
 
 # ============================================================
@@ -190,12 +195,15 @@ def build_sticker_tool():
         types.FunctionDeclaration(
             name="send_sticker",
             description=(
-                "Gửi 1 sticker Zalo phù hợp với cảm xúc/ngữ cảnh cuộc trò chuyện hiện tại. "
-                "KHI NGƯỜI DÙNG NHỜ GỬI STICKER (vd 'gửi sticker haha', 'gửi sticker vui') "
-                "thì BẮT BUỘC gọi hàm này thay vì trả lời text. "
+                "Gửi 1 sticker Zalo. Gọi hàm này theo NGỮ CẢNH: khi người dùng vui vẻ, "
+                "đùa giỡn, kể chuyện buồn, chào hỏi, tạm biệt, cảm ơn, giận dỗi, bất ngờ, "
+                "chúc mừng sinh nhật... hãy CHỦ ĐỘNG gửi sticker phù hợp kèm lời nhắn ngắn "
+                "để câu trả lời sống động. KHI NGƯỜI DÙNG NHỜ GỬI STICKER (vd 'gửi sticker "
+                "haha') thì BẮT BUỘC gọi hàm này thay vì trả lời text. "
                 "Các mood có sẵn: vui, haha, buon, yeu, ghet, tuc, chao, bye, woa, "
                 "camon, sinh_nhat, meme, chan, buon_ngu. Chọn mood phù hợp nhất. "
-                "Không lạm dụng, không gọi liên tục."
+                "Giới hạn tối đa 1 sticker mỗi lần trả lời, không gửi khi câu hỏi cần "
+                "câu trả lời nội dung (hỏi thông tin, nhờ viết code...)."
             ),
             parameters={
                 "type": "object",
@@ -656,6 +664,7 @@ def run_bot_in_background():
         return
 
     try:
+        log(f"🌐 PUBLIC_URL = {PUBLIC_URL or '(CHƯA CÓ - ảnh/voice sẽ không gửi được)'}")
         app_zalo = ApplicationBuilder().token(BOT_TOKEN).build()
         app_zalo.add_handler(CommandHandler("start", start))
         app_zalo.add_handler(CommandHandler("reset", reset))

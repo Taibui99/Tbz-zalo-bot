@@ -88,8 +88,10 @@ def text_to_aac(text: str, voice: str = DEFAULT_VOICE, rate: str = DEFAULT_RATE)
         ffmpeg = _find_ffmpeg()
         if not ffmpeg:
             return None
+        # ép sample rate 44100 Hz (chuẩn, tương thích tối đa với trình phát của Zalo),
+        # mono 1 kênh, AAC LC @ 64kbps
         subprocess.run(
-            [ffmpeg, "-y", "-i", mp3_path, "-c:a", "aac", "-b:a", "64k", aac_path],
+            [ffmpeg, "-y", "-i", mp3_path, "-ar", "44100", "-ac", "1", "-c:a", "aac", "-b:a", "64k", aac_path],
             capture_output=True,
             timeout=120,
             check=True,
