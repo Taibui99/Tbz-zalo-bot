@@ -46,9 +46,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 # Grok qua OpenRouter (API kiểu OpenAI) - dùng cho TRÒ CHUYỆN TEXT, mọi tác vụ
 # (tạo ảnh, phân tích ảnh, voice, sticker) vẫn do Gemini/nền tảng khác đảm nhiệm.
-# Để trống GROK_API_KEY thì bot dùng Gemini cho mọi thứ như cũ.
+# LƯU Ý: OpenRouter không còn Grok free (grok-4-fast:free đã bị gỡ) - đây là model
+# trả phí rẻ (~$1.25/1M token vào, ~2.500đ cho cả nghìn lượt chat). Để trống
+# GROK_API_KEY thì bot dùng Gemini cho mọi thứ như cũ.
 GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
-GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4-fast:free")
+GROK_MODEL = os.environ.get("GROK_MODEL", "x-ai/grok-4.20")
 GROK_API_BASE = os.environ.get("GROK_API_BASE", "https://openrouter.ai/api/v1")
 # Danh sách model tạo ảnh, thử lần lượt theo thứ tự. gemini-2.5-flash-image
 # (Nano Banana) là model DUY NHẤT có free tier - các model Pro chỉ chạy khi
