@@ -293,6 +293,30 @@ def build_time_context() -> str:
     return f"[Bối cảnh hệ thống: Bây giờ là {now.strftime('%H:%M')} ngày {weekday_vi}, {now.strftime('%d/%m/%Y')} (giờ Việt Nam). Dùng thông tin này nếu người dùng hỏi về ngày giờ hiện tại, đừng tự đoán.]"
 
 
+def build_chat_context(update: Update) -> str:
+    """Bối cảnh kênh trò chuyện (nhóm/1-1 + người gửi) để Gemini xử sự đúng chỗ.
+    Trong nhóm: nói chuyện công khai, nhắc tên người gửi, không tâm sự riêng tư,
+    không gửi voice. 1-1: thoải mái như bạn thân."""
+    chat = update.message.chat
+    chat_type = getattr(chat, "type", "PRIVATE")
+    sender = update.effective_user.display_name if update.effective_user else "một người dùng"
+    if chat_type == "GROUP":
+        members = getattr(chat, "members_count", None)
+        count = f"{members} thành viên" if members else "nhiều thành viên"
+        return (
+            f"[Bối cảnh hệ thống: Bạn đang ở trong MỘT NHÓM CHAT ZALO ({count}). "
+            f"Người vừa nhắn là {sender}, tin nhắn hiển thị công khai cho cả nhóm. "
+            f"Hãy xử sự phù hợp: nói chuyện thân thiện nhưng có chừng mực hơn 1-1, "
+            f"BẮT BUỘC nhắc tên {sender} trong câu trả lời để cả nhóm biết bạn đang "
+            f"trả lời ai, không tâm sự chuyện riêng tư, KHÔNG gửi voice (voice không "
+            f"hỗ trợ trong nhóm).]"
+        )
+    return (
+        f"[Bối cảnh hệ thống: Bạn đang trò chuyện 1-1 với {sender}. "
+        f"Nói chuyện thoải mái như bạn thân, có thể chủ động gửi sticker/voice theo ngữ cảnh.]"
+    )
+
+
 def _gen_image_bytes(prompt: str):
     """Gọi model tạo ảnh của Gemini, thử lần lượt từng model trong
     IMAGE_GEN_MODELS (model free tier trước). Trả (bytes, mime_type) hoặc None."""
@@ -614,7 +638,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     allow_voice = getattr(update.message.chat, "type", "PRIVATE") != "GROUP"
     reply_text, sticker_id, photo_url, voice_url = await call_gemini_with_typing(
-        update.get_bot(), chat_id, [text], allow_voice
+        update.get_bot(), chat_id, [build_chat_context(update), text], allow_voice
     )
     await send_media_replies(update, chat_id, sticker_id, photo_url, voice_url)
     await send_long_reply(update, reply_text)
@@ -654,7 +678,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     allow_voice = getattr(update.message.chat, "type", "PRIVATE") != "GROUP"
     reply_text, sticker_id, photo_url, voice_url = await call_gemini_with_typing(
-        update.get_bot(), chat_id, [image_part, prompt], allow_voice
+        update.get_bot(), chat_id, [image_part, build_chat_context(update), prompt], allow_voice
     )
     await send_media_replies(update, chat_id, sticker_id, photo_url, voice_url)
     await send_long_reply(update, reply_text)
