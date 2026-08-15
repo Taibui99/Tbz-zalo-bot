@@ -44,6 +44,12 @@ def vn_now() -> datetime:
 BOT_TOKEN = os.environ.get("ZALO_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+# Grok qua OpenRouter (API kiểu OpenAI) - dùng cho TRÒ CHUYỆN TEXT, mọi tác vụ
+# (tạo ảnh, phân tích ảnh, voice, sticker) vẫn do Gemini/nền tảng khác đảm nhiệm.
+# Để trống GROK_API_KEY thì bot dùng Gemini cho mọi thứ như cũ.
+GROK_API_KEY = os.environ.get("GROK_API_KEY", "")
+GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4-fast:free")
+GROK_API_BASE = os.environ.get("GROK_API_BASE", "https://openrouter.ai/api/v1")
 # Danh sách model tạo ảnh, thử lần lượt theo thứ tự. gemini-2.5-flash-image
 # (Nano Banana) là model DUY NHẤT có free tier - các model Pro chỉ chạy khi
 # tài khoản trả phí, nên để nó đầu danh sách.
@@ -182,30 +188,52 @@ def get_gemini_client():
 chat_sessions = {}
 
 
+# Mô tả tool dùng chung cho cả Gemini (google-genai) lẫn Grok (OpenAI format)
+STICKER_TOOL_DESC = (
+    "Gửi 1 sticker Zalo. Gọi hàm này theo NGỮ CẢNH: khi người dùng vui vẻ, "
+    "đùa giỡn, kể chuyện buồn, chào hỏi, tạm biệt, cảm ơn, giận dỗi, bất ngờ, "
+    "chúc mừng sinh nhật... hãy CHỦ ĐỘNG gửi sticker phù hợp kèm lời nhắn ngắn "
+    "để câu trả lời sống động. KHI NGƯỜI DÙNG NHỜ GỬI STICKER (vd 'gửi sticker "
+    "haha') thì BẮT BUỘC gọi hàm này thay vì trả lời text. "
+    "Các mood có sẵn: vui, haha, buon, yeu, ghet, tuc, chao, bye, woa, "
+    "camon, sinh_nhat, meme, chan, buon_ngu, nghi_ngo, dong_y. "
+    "Chọn mood phù hợp nhất. "
+    "Giới hạn tối đa 1 sticker mỗi lần trả lời, không gửi khi câu hỏi cần "
+    "câu trả lời nội dung (hỏi thông tin, nhờ viết code...)."
+)
+IMAGE_TOOL_DESC = (
+    "Tạo 1 bức ảnh bằng AI theo mô tả của người dùng rồi gửi kèm vào cuộc "
+    "trò chuyện. Chỉ gọi khi người dùng nhờ vẽ/tạo ảnh (vd 'vẽ cho mình...', "
+    "'tạo ảnh...', 'ảnh một con mèo...'). QUAN TRỌNG: tham số prompt phải "
+    "được DỊCH SANG TIẾNG ANH, mô tả chi tiết đầy đủ (chủ thể, hành động, "
+    "phong cách, màu sắc, bố cục) - model tạo ảnh xử lý tiếng Anh tốt hơn "
+    "nhiều lần, dịch sai ý là ảnh sai."
+)
+VOICE_TOOL_DESC = (
+    "Gửi 1 tin nhắn thoại (voice) cho người dùng, nội dung do bạn soạn theo "
+    "ngữ cảnh. KHI NGƯỜI DÙNG NHỜ GỬI VOICE / NHẮN THOẠI / ĐỌC TO LÊN thì "
+    "BẮT BUỘC gọi hàm này thay vì trả lời bằng text. Nội dung text nên ngắn "
+    "gọn, tự nhiên như lời nói. Chỉ hoạt động trong chat 1-1, không gọi cho "
+    "nhóm."
+)
+
+
+def sticker_moods() -> list:
+    data = storage.load_data()
+    return list(data.get("sticker_library", {}).keys())
+
+
 def build_sticker_tool():
     """Xây khai báo hàm 'send_sticker' cho Gemini, liệt kê đúng các mood đang có
     trong thư viện sticker (cài trên dashboard). Nếu chưa có sticker nào thì
     không đưa tool này vào, tránh Gemini cố gọi 1 hàm vô nghĩa."""
-    data = storage.load_data()
-    library = data.get("sticker_library", {})
-    if not library:
+    moods = sticker_moods()
+    if not moods:
         return None
-    moods = list(library.keys())
     return types.Tool(function_declarations=[
         types.FunctionDeclaration(
             name="send_sticker",
-            description=(
-                "Gửi 1 sticker Zalo. Gọi hàm này theo NGỮ CẢNH: khi người dùng vui vẻ, "
-                "đùa giỡn, kể chuyện buồn, chào hỏi, tạm biệt, cảm ơn, giận dỗi, bất ngờ, "
-                "chúc mừng sinh nhật... hãy CHỦ ĐỘNG gửi sticker phù hợp kèm lời nhắn ngắn "
-                "để câu trả lời sống động. KHI NGƯỜI DÙNG NHỜ GỬI STICKER (vd 'gửi sticker "
-                "haha') thì BẮT BUỘC gọi hàm này thay vì trả lời text. "
-                "Các mood có sẵn: vui, haha, buon, yeu, ghet, tuc, chao, bye, woa, "
-                "camon, sinh_nhat, meme, chan, buon_ngu, nghi_ngo, dong_y. "
-                "Chọn mood phù hợp nhất. "
-                "Giới hạn tối đa 1 sticker mỗi lần trả lời, không gửi khi câu hỏi cần "
-                "câu trả lời nội dung (hỏi thông tin, nhờ viết code...)."
-            ),
+            description=STICKER_TOOL_DESC,
             parameters={
                 "type": "object",
                 "properties": {
@@ -230,14 +258,7 @@ def build_tools():
     tools.append(types.Tool(function_declarations=[
         types.FunctionDeclaration(
             name="generate_image",
-            description=(
-                "Tạo 1 bức ảnh bằng AI theo mô tả của người dùng rồi gửi kèm vào cuộc "
-                "trò chuyện. Chỉ gọi khi người dùng nhờ vẽ/tạo ảnh (vd 'vẽ cho mình...', "
-                "'tạo ảnh...', 'ảnh một con mèo...'). QUAN TRỌNG: tham số prompt phải "
-                "được DỊCH SANG TIẾNG ANH, mô tả chi tiết đầy đủ (chủ thể, hành động, "
-                "phong cách, màu sắc, bố cục) - model tạo ảnh xử lý tiếng Anh tốt hơn "
-                "nhiều lần, dịch sai ý là ảnh sai."
-            ),
+            description=IMAGE_TOOL_DESC,
             parameters={
                 "type": "object",
                 "properties": {
@@ -251,13 +272,7 @@ def build_tools():
         ),
         types.FunctionDeclaration(
             name="send_voice",
-            description=(
-                "Gửi 1 tin nhắn thoại (voice) cho người dùng, nội dung do bạn soạn theo "
-                "ngữ cảnh. KHI NGƯỜI DÙNG NHỜ GỬI VOICE / NHẮN THOẠI / ĐỌC TO LÊN thì "
-                "BẮT BUỘC gọi hàm này thay vì trả lời bằng text. Nội dung text nên ngắn "
-                "gọn, tự nhiên như lời nói. Chỉ hoạt động trong chat 1-1, không gọi cho "
-                "nhóm."
-            ),
+            description=VOICE_TOOL_DESC,
             parameters={
                 "type": "object",
                 "properties": {
@@ -271,6 +286,109 @@ def build_tools():
         ),
     ]))
     return tools
+
+
+def build_openai_tools() -> list:
+    """Các tool trên dưới dạng OpenAI format (dùng cho Grok qua OpenRouter)."""
+    tools = []
+    moods = sticker_moods()
+    if moods:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "send_sticker",
+                "description": STICKER_TOOL_DESC,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mood": {
+                            "type": "string",
+                            "enum": moods,
+                            "description": "Cảm xúc/ngữ cảnh phù hợp nhất trong danh sách có sẵn",
+                        }
+                    },
+                    "required": ["mood"],
+                },
+            },
+        })
+    tools.extend([
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_image",
+                "description": IMAGE_TOOL_DESC,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "Mô tả chi tiết bức ảnh cần tạo",
+                        }
+                    },
+                    "required": ["prompt"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_voice",
+                "description": VOICE_TOOL_DESC,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Nội dung sẽ đọc thành voice, viết như lời nói tự nhiên",
+                        }
+                    },
+                    "required": ["text"],
+                },
+            },
+        },
+    ])
+    return tools
+
+
+def execute_tool(name: str, args: dict, allow_voice: bool) -> tuple:
+    """Chạy 1 tool (sticker/ảnh/voice) - dùng chung cho Gemini lẫn Grok.
+    Trả (result_msg, sticker_id, photo_url, voice_url)."""
+    sticker_id_to_send = None
+    photo_url_to_send = None
+    voice_url_to_send = None
+    log(f"🔧 Gọi tool {name} với tham số {dict(args)}")
+    if name == "send_sticker":
+        mood = args.get("mood")
+        data = storage.load_data()
+        sticker_id_to_send = data.get("sticker_library", {}).get(mood)
+        result_msg = (
+            "đã gửi sticker cho người dùng"
+            if sticker_id_to_send
+            else "không có sticker phù hợp, bỏ qua"
+        )
+    elif name == "generate_image":
+        prompt = (args.get("prompt") or "").strip()
+        photo_url_to_send = generate_and_store_image(prompt) if prompt else None
+        result_msg = (
+            "đã tạo và gửi ảnh cho người dùng"
+            if photo_url_to_send
+            else "không tạo được ảnh, hãy nói lý do (vd thiếu PUBLIC_URL hoặc lỗi model) cho người dùng"
+        )
+    elif name == "send_voice":
+        if allow_voice:
+            text = (args.get("text") or "").strip()
+            voice_url_to_send = make_voice_url(text) if text else None
+            result_msg = (
+                "đã gửi voice cho người dùng"
+                if voice_url_to_send
+                else "không gửi được voice, hãy nói lý do (vd thiếu PUBLIC_URL, thiếu ffmpeg hoặc lỗi TTS) cho người dùng"
+            )
+        else:
+            result_msg = "không gửi được voice vì cuộc trò chuyện này là nhóm"
+    else:
+        result_msg = "không hiểu tool, bỏ qua"
+    log(f"🔧 Kết quả tool {name}: {result_msg}")
+    return result_msg, sticker_id_to_send, photo_url_to_send, voice_url_to_send
 
 
 def get_chat_session(chat_id: str):
@@ -492,37 +610,10 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
         if response.function_calls:
             function_responses = []
             for fc in response.function_calls:
-                result_msg = "đã xử lý"
-                log(f"🔧 Gemini gọi tool {fc.name} với tham số {dict(fc.args)}")
-                if fc.name == "send_sticker":
-                    mood = fc.args.get("mood")
-                    data = storage.load_data()
-                    sticker_id_to_send = data.get("sticker_library", {}).get(mood)
-                    result_msg = (
-                        "đã gửi sticker cho người dùng"
-                        if sticker_id_to_send
-                        else "không có sticker phù hợp, bỏ qua"
-                    )
-                elif fc.name == "generate_image":
-                    prompt = (fc.args.get("prompt") or "").strip()
-                    photo_url_to_send = generate_and_store_image(prompt) if prompt else None
-                    result_msg = (
-                        "đã tạo và gửi ảnh cho người dùng"
-                        if photo_url_to_send
-                        else "không tạo được ảnh, hãy nói lý do (vd thiếu PUBLIC_URL hoặc lỗi model) cho người dùng"
-                    )
-                elif fc.name == "send_voice":
-                    if allow_voice:
-                        text = (fc.args.get("text") or "").strip()
-                        voice_url_to_send = make_voice_url(text) if text else None
-                        result_msg = (
-                            "đã gửi voice cho người dùng"
-                            if voice_url_to_send
-                            else "không gửi được voice, hãy nói lý do (vd thiếu PUBLIC_URL, thiếu ffmpeg hoặc lỗi TTS) cho người dùng"
-                        )
-                    else:
-                        result_msg = "không gửi được voice vì cuộc trò chuyện này là nhóm"
-                log(f"🔧 Kết quả tool {fc.name}: {result_msg}")
+                result_msg, s_id, p_url, v_url = execute_tool(fc.name, dict(fc.args), allow_voice)
+                sticker_id_to_send = sticker_id_to_send or s_id
+                photo_url_to_send = photo_url_to_send or p_url
+                voice_url_to_send = voice_url_to_send or v_url
                 function_responses.append(
                     types.Part.from_function_response(name=fc.name, response={"result": result_msg})
                 )
@@ -550,6 +641,104 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
         return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None, None, None
 
 
+# ============================================================
+# GROK (OpenRouter - API kiểu OpenAI) - dùng cho TRÒ CHUYỆN TEXT
+# ============================================================
+grok_sessions: dict = {}  # chat_id -> list[dict] messages OpenAI format
+
+MAX_GROK_HISTORY = 24  # giữ tối đa 24 tin nhắn (ngoài system) để khỏi phình
+
+
+def get_grok_session(chat_id: str) -> list:
+    msgs = grok_sessions.get(chat_id)
+    if msgs is None:
+        msgs = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+        grok_sessions[chat_id] = msgs
+    return msgs
+
+
+def call_grok(chat_id: str, user_text: str, allow_voice: bool = True) -> tuple:
+    """Trò chuyện text qua Grok (OpenRouter, OpenAI-compatible) kèm tool calling.
+    Trả (text, sticker_id, photo_url, voice_url). Ném exception khi lỗi để caller
+    fallback sang Gemini - mọi tác vụ nền (tạo ảnh, TTS) vẫn như cũ."""
+    import json as _json
+
+    messages = get_grok_session(chat_id)
+    messages.append({"role": "user", "content": f"{build_time_context()} {user_text}"})
+
+    sticker_id_to_send = None
+    photo_url_to_send = None
+    voice_url_to_send = None
+
+    for _ in range(4):  # tối đa 4 vòng tool calling
+        payload = {
+            "model": GROK_MODEL,
+            "messages": messages,
+            "tools": build_openai_tools(),
+            "tool_choice": "auto",
+        }
+        resp = requests.post(
+            f"{GROK_API_BASE}/chat/completions",
+            headers={"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        msg = data["choices"][0]["message"]
+        if msg.get("tool_calls"):
+            messages.append({
+                "role": "assistant",
+                "content": msg.get("content") or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        },
+                    }
+                    for tc in msg["tool_calls"]
+                ],
+            })
+            for tc in msg["tool_calls"]:
+                name = tc["function"]["name"]
+                try:
+                    args = _json.loads(tc["function"]["arguments"] or "{}")
+                except _json.JSONDecodeError:
+                    args = {}
+                result_msg, s_id, p_url, v_url = execute_tool(name, args, allow_voice)
+                sticker_id_to_send = sticker_id_to_send or s_id
+                photo_url_to_send = photo_url_to_send or p_url
+                voice_url_to_send = voice_url_to_send or v_url
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_msg})
+            continue
+
+        text = (msg.get("content") or "").strip() or "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
+        messages.append({"role": "assistant", "content": text})
+        # cắt lịch sử cho khỏi phình, luôn giữ dòng system đầu
+        if len(messages) > MAX_GROK_HISTORY + 1:
+            grok_sessions[chat_id] = messages[:1] + messages[-(MAX_GROK_HISTORY):]
+        return text, sticker_id_to_send, photo_url_to_send, voice_url_to_send
+
+    return "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé.", sticker_id_to_send, photo_url_to_send, voice_url_to_send
+
+
+def call_chat_llm(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
+    """Điều phối LLM trò chuyện: Grok (nếu có key) cho chat text, fallback Gemini
+    khi lỗi/rate limit. parts chứa ảnh (không phải text thuần) thì luôn dùng Gemini
+    vì phân tích ảnh cần vision đáng tin cậy. Trả về tuple giống call_gemini."""
+    if GROK_API_KEY and all(isinstance(p, str) for p in parts):
+        user_text = "\n".join(parts)
+        try:
+            return call_grok(chat_id, user_text, allow_voice)
+        except Exception as e:
+            stats["error_count"] += 1
+            log(f"⚠️  Grok lỗi ({GROK_MODEL}): {e} - fallback sang Gemini")
+    return call_gemini(chat_id, parts, allow_voice)
+
+
 async def keep_typing(bot, chat_id: str, interval: float = 4.0):
     try:
         while True:
@@ -573,7 +762,7 @@ def ensure_owner_captured(chat_id: str):
 async def call_gemini_with_typing(bot, chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
     typing_task = asyncio.create_task(keep_typing(bot, chat_id))
     try:
-        result = await asyncio.to_thread(call_gemini, chat_id, parts, allow_voice)
+        result = await asyncio.to_thread(call_chat_llm, chat_id, parts, allow_voice)
     finally:
         typing_task.cancel()
     return result
@@ -601,6 +790,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     chat_sessions.pop(chat_id, None)
+    grok_sessions.pop(chat_id, None)
     await update.message.reply_text("Đã xoá ngữ cảnh cũ, bắt đầu cuộc trò chuyện mới nhé 🔄")
 
 
