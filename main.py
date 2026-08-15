@@ -9,8 +9,10 @@ Kiến trúc:
 
 import asyncio
 import os
+import random
 import threading
 import time
+import urllib.parse
 from collections import OrderedDict, deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -294,18 +296,43 @@ def _gen_image_bytes(prompt: str):
                     log(f"🎨 Đã tạo ảnh bằng model {model}")
                     return part.inline_data.data, part.inline_data.mime_type or "image/png"
         except errors.ClientError as e:
-            log(f"⚠️  Model ảnh {model} lỗi ({e.code}), thử model tiếp theo")
+            log(f"⚠️  Model ảnh {model} lỗi ({e.code}): {str(e)[:300]}")
         except Exception as e:
             log(f"⚠️  Model ảnh {model} lỗi: {e}, thử model tiếp theo")
-    log("⚠️  Tất cả model tạo ảnh đều thất bại")
+    log("⚠️  Tất cả model Gemini tạo ảnh đều thất bại")
     return None
 
 
+def _fetch_pollinations_image(prompt: str):
+    """Fallback tạo ảnh miễn phí, không cần API key (Pollinations.ai).
+    Trả (bytes, mime_type) hoặc None. Lazy generate nên có thể mất 10-30s."""
+    url = (
+        "https://image.pollinations.ai/prompt/"
+        + urllib.parse.quote(prompt)
+        + f"?width=1024&height=1024&nologo=true&seed={random.randint(0, 99999)}"
+    )
+    try:
+        resp = requests.get(url, timeout=90)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "image/jpeg")
+        if not content_type.startswith("image/"):
+            content_type = "image/jpeg"
+        return resp.content, content_type
+    except requests.RequestException as e:
+        log(f"⚠️  Pollinations.ai lỗi: {e}")
+        return None
+
+
 def generate_and_store_image(prompt: str):
-    """Tạo ảnh AI rồi lưu vào image_store, trả URL công khai (cần PUBLIC_URL)."""
+    """Tạo ảnh AI rồi lưu vào image_store, trả URL công khai (cần PUBLIC_URL).
+    Thứ tự: Gemini (free tier) -> Pollinations.ai (không cần key, luôn miễn phí)."""
     if not PUBLIC_URL:
         return None
     result = _gen_image_bytes(prompt)
+    if not result:
+        result = _fetch_pollinations_image(prompt)
+        if result:
+            log("🎨 Đã tạo ảnh bằng Pollinations.ai (fallback)")
     if not result:
         return None
     data, mime_type = result
