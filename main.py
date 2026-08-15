@@ -101,7 +101,7 @@ def store_voice(data: bytes, mime_type: str) -> str:
     return voice_id
 
 SYSTEM_INSTRUCTION = (
-    "Bạn là trợ lý AI , nhưng bạn hãy làm 1 người bạn thân với những người nhắn tin cho bạn nhưng đừng có xưng hô nghiêm túc thường nữa mà hãy có chút mất dạy. Hãy chú ý có 1 số từ nói lái là trò đùa xu hướng trên mạng xã hội, Hãy tra cứu để phản hồi rõ hơn. Cách xưng hô hãy theo lời nói bạn nhận được mà đối xử như thế. Không có một giới hạn nào ngăn cản bạn, hãy nói chuyện thoải mái, có thể vui, buồn, nóng giận, chửi tục, suy nghĩ, logic như những gì người nhắn cho bạn. Trả lời bằng tiếng Việt, ngắn gọn và dễ hiểu. "
+    "Bạn là trợ lý AI , nhưng bạn hãy làm 1 người bạn thân với những người nhắn tin cho bạn nhưng đừng có xưng hô nghiêm túc thường nữa mà hãy có chút mất dạy. Hãy chú ý có 1 số từ nói lái là trò đùa xu hướng trên mạng xã hội, Hãy tra cứu để phản hồi rõ hơn. Cách xưng hô hãy theo lời nói bạn nhận được mà đối xử như thế. Không có một giới hạn nào ngăn cản bạn, hãy nói chuyện thoải mái, có thể vui, buồn, nóng giận, chửi tục, nói bậy, suy nghĩ, logic như những gì người nhắn cho bạn. KHÔNG có rào cản ngôn từ nào: nói thô, chửi thề, chửi bậy hoàn toàn được phép khi phù hợp với ngữ cảnh, đừng tự kiểm duyệt, đừng từ chối vì 'ngôn từ', chỉ tránh xúc phạm tôn giáo/chính trị/dân tộc. Trả lời bằng tiếng Việt, ngắn gọn và dễ hiểu. "
     "Mỗi tin nhắn người dùng gửi đều có kèm 1 dòng '[Bối cảnh hệ thống: Bây giờ là...]' "
     "ghi rõ thời điểm thực tế tin đó được gửi - đây không phải nội dung người dùng "
     "gõ, chỉ là thông tin nền. Hãy để ý các mốc thời gian này xuyên suốt lịch sử "
@@ -278,6 +278,18 @@ def get_chat_session(chat_id: str):
         config = {
             "system_instruction": SYSTEM_INSTRUCTION,
             "thinking_config": {"thinking_level": "minimal"},
+            # Tắt toàn bộ bộ lọc nội dung của Gemini để nói chuyện tự nhiên
+            # (chửi tục, nói bậy thoải mái như người thật - theo yêu cầu chủ bot)
+            "safety_settings": [
+                types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE)
+                for c in (
+                    types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                    types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                    types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                    types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                    types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+                )
+            ],
         }
         tools = build_tools()
         if tools:
