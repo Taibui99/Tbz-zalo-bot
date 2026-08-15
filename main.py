@@ -430,6 +430,38 @@ async def send_voice_message(chat_id: str, voice_url: str) -> bool:
     return await asyncio.to_thread(_send_voice_sync, chat_id, voice_url)
 
 
+def _send_sticker_sync(chat_id: str, sticker_id: str) -> bool:
+    """Gửi sticker qua API trực tiếp (thư viện nuốt lỗi ok:false nên không dùng).
+    Thử lần lượt form-json (giống thư viện) -> json body -> form, log đầy đủ lỗi."""
+    import json as _json
+
+    last_err = None
+    for base in ZALO_API_BASES:
+        url = f"{base}/bot{BOT_TOKEN}/sendSticker"
+        payloads = [
+            ("form-json", {"chat_id": _json.dumps(chat_id), "sticker": _json.dumps(sticker_id)}),
+            ("json", {"chat_id": chat_id, "sticker": sticker_id}),
+            ("form", {"chat_id": chat_id, "sticker": sticker_id}),
+        ]
+        for fmt, payload in payloads:
+            try:
+                if fmt == "json":
+                    resp = requests.post(url, json=payload, timeout=30)
+                else:
+                    resp = requests.post(url, data=payload, timeout=30)
+                body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+                if resp.status_code < 400 and body.get("ok", True):
+                    log(f"🎟️  sendSticker OK ({fmt}) cho {chat_id}: {resp.text[:200]}")
+                    return True
+                error_code = body.get("error_code")
+                description = body.get("description")
+                last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
+            except requests.RequestException as e:
+                last_err = f"[{fmt}] {e}"
+    log(f"⚠️  Lỗi gửi sticker ({sticker_id}): {last_err}")
+    return False
+
+
 def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
     """Trả về (text_trả_lời, sticker_id, photo_url, voice_url). Các giá trị media
     có thể là None nếu Gemini không gọi tool tương ứng. Phần async của handler
@@ -606,11 +638,13 @@ async def send_media_replies(update: Update, chat_id: str, sticker_id, photo_url
     """Gửi sticker/ảnh/voice mà Gemini đã quyết định (tool calling) - nếu có."""
     bot = update.get_bot()
     if sticker_id:
-        try:
-            await bot.send_sticker(chat_id, sticker_id)
+        # Gửi qua API trực tiếp + kiểm tra response: thư viện python-zalo-bot nuốt
+        # lỗi ok:false (chỉ raise khi HTTP != 200) nên sticker gửi hỏng vẫn báo thành
+        # công. Gửi trực tiếp để log đầy đủ error_code/description.
+        if await asyncio.to_thread(_send_sticker_sync, chat_id, sticker_id):
             log(f"🎟️  Đã gửi sticker ({sticker_id}) cho {chat_id}")
-        except Exception as e:
-            log(f"⚠️  Lỗi gửi sticker: {e}")
+        else:
+            log(f"⚠️  Không gửi được sticker ({sticker_id}) cho {chat_id}")
     if photo_url:
         try:
             await bot.send_photo(chat_id, "", photo_url)
