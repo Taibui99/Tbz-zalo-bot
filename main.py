@@ -42,7 +42,17 @@ def vn_now() -> datetime:
 BOT_TOKEN = os.environ.get("ZALO_BOT_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-IMAGE_GEN_MODEL = os.environ.get("IMAGE_GEN_MODEL", "gemini-3-pro-image")
+# Danh sách model tạo ảnh, thử lần lượt theo thứ tự. gemini-2.5-flash-image
+# (Nano Banana) là model DUY NHẤT có free tier - các model Pro chỉ chạy khi
+# tài khoản trả phí, nên để nó đầu danh sách.
+IMAGE_GEN_MODELS = [
+    m.strip()
+    for m in os.environ.get(
+        "IMAGE_GEN_MODELS",
+        "gemini-2.5-flash-image,gemini-3.1-flash-image-preview,gemini-3-pro-image",
+    ).split(",")
+    if m.strip()
+]
 
 # Các domain API Zalo Bot - thư viện dùng zapps.me, tài liệu chính thức ghi
 # zaloplatforms.com, nên thử lần lượt cho chắc.
@@ -227,8 +237,10 @@ def build_tools():
             name="send_voice",
             description=(
                 "Gửi 1 tin nhắn thoại (voice) cho người dùng, nội dung do bạn soạn theo "
-                "ngữ cảnh. Chỉ gọi khi người dùng nhờ gửi voice/nhắn thoại/đọc to lên. "
-                "Chỉ hoạt động trong chat 1-1, không gọi cho nhóm."
+                "ngữ cảnh. KHI NGƯỜI DÙNG NHỜ GỬI VOICE / NHẮN THOẠI / ĐỌC TO LÊN thì "
+                "BẮT BUỘC gọi hàm này thay vì trả lời bằng text. Nội dung text nên ngắn "
+                "gọn, tự nhiên như lời nói. Chỉ hoạt động trong chat 1-1, không gọi cho "
+                "nhóm."
             ),
             parameters={
                 "type": "object",
@@ -267,16 +279,25 @@ def build_time_context() -> str:
 
 
 def _gen_image_bytes(prompt: str):
-    """Gọi model tạo ảnh của Gemini, trả (bytes, mime_type) hoặc None."""
+    """Gọi model tạo ảnh của Gemini, thử lần lượt từng model trong
+    IMAGE_GEN_MODELS (model free tier trước). Trả (bytes, mime_type) hoặc None."""
     client = get_gemini_client()
-    response = client.models.generate_content(
-        model=IMAGE_GEN_MODEL,
-        contents=prompt,
-        config={"response_modalities": ["IMAGE"]},
-    )
-    for part in response.candidates[0].content.parts:
-        if getattr(part, "inline_data", None):
-            return part.inline_data.data, part.inline_data.mime_type or "image/png"
+    for model in IMAGE_GEN_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config={"response_modalities": ["IMAGE"]},
+            )
+            for part in response.candidates[0].content.parts:
+                if getattr(part, "inline_data", None):
+                    log(f"🎨 Đã tạo ảnh bằng model {model}")
+                    return part.inline_data.data, part.inline_data.mime_type or "image/png"
+        except errors.ClientError as e:
+            log(f"⚠️  Model ảnh {model} lỗi ({e.code}), thử model tiếp theo")
+        except Exception as e:
+            log(f"⚠️  Model ảnh {model} lỗi: {e}, thử model tiếp theo")
+    log("⚠️  Tất cả model tạo ảnh đều thất bại")
     return None
 
 
@@ -344,6 +365,7 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
             function_responses = []
             for fc in response.function_calls:
                 result_msg = "đã xử lý"
+                log(f"🔧 Gemini gọi tool {fc.name} với tham số {dict(fc.args)}")
                 if fc.name == "send_sticker":
                     mood = fc.args.get("mood")
                     data = storage.load_data()
@@ -372,6 +394,7 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
                         )
                     else:
                         result_msg = "không gửi được voice vì cuộc trò chuyện này là nhóm"
+                log(f"🔧 Kết quả tool {fc.name}: {result_msg}")
                 function_responses.append(
                     types.Part.from_function_response(name=fc.name, response={"result": result_msg})
                 )

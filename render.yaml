@@ -12,7 +12,7 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: gemini-flash-latest
-      - key: IMAGE_GEN_MODEL
-        value: gemini-3-pro-image
+      - key: IMAGE_GEN_MODELS
+        value: gemini-2.5-flash-image,gemini-3.1-flash-image-preview,gemini-3-pro-image
       - key: ZALO_VOICE
         value: vi-VN-HoaiMyNeural
