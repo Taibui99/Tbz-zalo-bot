@@ -39,9 +39,11 @@ DEFAULT_DATA = {
         "yeu": "bf596d9a51dfb881e1ce",   # Yêu Quá Đi
         "ghet": "c6c516062a43c31d9a52",  # Giận Rồi Nha
         "tuc": "140c51c86d8d84d3dd9c",   # Thỏ Cáu Kỉnh
-        "chao": "d8fa8021bc64553a0c75",  # Anh Tre Say Hi
+        "chao": "e0279194add1448f1dc0",  # [XÁC MINH] sticker chào của bro
         "bye": "8dc278014444ad1af455",   # Hi, Bye & Good Night
-        "woa": "add740147c51950fcc40",   # Wow! Bất Ngờ Quá
+        "woa": "5776d836e4730d2d5462",   # [XÁC MINH] sticker bất ngờ của bro
+        "nghi_ngo": "009cc1d1fd9414ca4d85",  # [XÁC MINH] sticker nghi ngờ của bro
+        "dong_y": "2d8f5ecc62898bd7d298",    # [XÁC MINH] sticker đồng ý của bro
         "camon": "f6bbdb76e7330e6d5722", # Bên Nhau
         "sinh_nhat": "905570964cd3a58dfcc2",  # Happy Birthday 2
         "meme": "021e76da4a9fa3c1fa8e",  # Meme Boss Cat

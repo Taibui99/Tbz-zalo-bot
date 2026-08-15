@@ -201,7 +201,8 @@ def build_sticker_tool():
                 "để câu trả lời sống động. KHI NGƯỜI DÙNG NHỜ GỬI STICKER (vd 'gửi sticker "
                 "haha') thì BẮT BUỘC gọi hàm này thay vì trả lời text. "
                 "Các mood có sẵn: vui, haha, buon, yeu, ghet, tuc, chao, bye, woa, "
-                "camon, sinh_nhat, meme, chan, buon_ngu. Chọn mood phù hợp nhất. "
+                "camon, sinh_nhat, meme, chan, buon_ngu, nghi_ngo, dong_y. "
+                "Chọn mood phù hợp nhất. "
                 "Giới hạn tối đa 1 sticker mỗi lần trả lời, không gửi khi câu hỏi cần "
                 "câu trả lời nội dung (hỏi thông tin, nhờ viết code...)."
             ),
