@@ -29,21 +29,23 @@ DEFAULT_DATA = {
     "schedule": {"Mon": [], "Tue": [], "Wed": [], "Thu": [], "Fri": [], "Sat": [], "Sun": []},
     # sticker_library: { "vui": "451a23c11f84f6daaf95", "buon": "...", ... } - mood key
     # bằng tiếng Việt không dấu, để Gemini chọn qua function calling.
-    # Mã sticker lấy THẬT từ https://stickers.zaloapp.com/sticker (pack miễn phí).
+    # "vui" và "buon" là mã ĐÃ XÁC MINH (bro gửi sticker thật, bot nhận được),
+    # các mood còn lại lấy từ pack miễn phí https://stickers.zaloapp.com/sticker
+    # (nếu mood nào gửi lỗi, gửi sticker thật cho bot để lấy mã thay thế).
     "sticker_library": {
-        "vui": "a46477a74be2a2bcfbf3",     # Vui Ghê
-        "haha": "bcad5b6a672f8e71d73e",    # Cà Khịa
-        "buon": "48cda40e984b7115285a",    # Ngày Không Vui
-        "yeu": "bf596d9a51dfb881e1ce",     # Yêu Quá Đi
-        "ghet": "c6c516062a43c31d9a52",    # Giận Rồi Nha
-        "tuc": "140c51c86d8d84d3dd9c",     # Thỏ Cáu Kỉnh
-        "chao": "d8fa8021bc64553a0c75",    # Anh Tre Say Hi
-        "bye": "8dc278014444ad1af455",     # Hi, Bye & Good Night
-        "woa": "add740147c51950fcc40",     # Wow! Bất Ngờ Quá
-        "camon": "f6bbdb76e7330e6d5722",   # Bên Nhau
+        "vui": "3eb5aad796927fcc2683",   # [XÁC MINH] sticker cười của bro
+        "buon": "744605053940d01e8951",  # [XÁC MINH] sticker khóc của bro
+        "haha": "bcad5b6a672f8e71d73e",  # Cà Khịa
+        "yeu": "bf596d9a51dfb881e1ce",   # Yêu Quá Đi
+        "ghet": "c6c516062a43c31d9a52",  # Giận Rồi Nha
+        "tuc": "140c51c86d8d84d3dd9c",   # Thỏ Cáu Kỉnh
+        "chao": "d8fa8021bc64553a0c75",  # Anh Tre Say Hi
+        "bye": "8dc278014444ad1af455",   # Hi, Bye & Good Night
+        "woa": "add740147c51950fcc40",   # Wow! Bất Ngờ Quá
+        "camon": "f6bbdb76e7330e6d5722", # Bên Nhau
         "sinh_nhat": "905570964cd3a58dfcc2",  # Happy Birthday 2
-        "meme": "021e76da4a9fa3c1fa8e",    # Meme Boss Cat
-        "chan": "862c43ee7fab96f5cfba",    # Nhạt
+        "meme": "021e76da4a9fa3c1fa8e",  # Meme Boss Cat
+        "chan": "862c43ee7fab96f5cfba",  # Nhạt
         "buon_ngu": "27d33d110154e80ab145",  # Mr. Lờ Đờ
     },
     # đánh dấu đã gửi thông báo nào hôm nay rồi, để không gửi lặp lại (reset mỗi ngày mới)
