@@ -329,14 +329,19 @@ def execute_tool(name: str, args: dict, allow_voice: bool) -> tuple:
     return result_msg, sticker_id_to_send, photo_url_to_send, voice_url_to_send
 
 
-def _all_safety_settings() -> list:
-    """Mở khóa TOÀN BỘ bộ lọc nội dung Gemini (kể cả JAILBREAK và các category
-    ảnh) - BLOCK_NONE hết, để nói chuyện tự nhiên không kiểm duyệt theo yêu cầu
-    chủ bot. Chỉ áp dụng khi bot do chủ sở hữu vận hành cho mục đích cá nhân."""
+def _all_safety_settings(include_image: bool = False) -> list:
+    """Mở khóa toàn bộ bộ lọc nội dung Gemini (kể cả JAILBREAK) - BLOCK_NONE hết,
+    để nói chuyện tự nhiên không kiểm duyệt theo yêu cầu chủ bot. Các category
+    IMAGE_* chỉ hợp lệ với model tạo ảnh (gemini-2.5-flash-image...), model text
+    sẽ báo 400 INVALID_ARGUMENT nếu gửi kèm nên mặc định bỏ qua."""
+    categories = [
+        c for c in types.HarmCategory
+        if c != types.HarmCategory.HARM_CATEGORY_UNSPECIFIED
+        and (include_image or not c.name.startswith("HARM_CATEGORY_IMAGE"))
+    ]
     return [
         types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE)
-        for c in types.HarmCategory
-        if c != types.HarmCategory.HARM_CATEGORY_UNSPECIFIED
+        for c in categories
     ]
 
 
@@ -399,7 +404,7 @@ def _gen_image_bytes(prompt: str):
                 contents=prompt,
                 config={
                     "response_modalities": ["IMAGE"],
-                    "safety_settings": _all_safety_settings(),
+                    "safety_settings": _all_safety_settings(include_image=True),
                 },
             )
             for part in response.candidates[0].content.parts:
