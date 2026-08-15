@@ -367,26 +367,37 @@ def make_voice_url(text: str):
 
 def _send_voice_sync(chat_id: str, voice_url: str) -> bool:
     """Gọi thẳng API sendVoice của Zalo Bot (thư viện python-zalo-bot chưa có hàm này).
+    Gửi theo nhiều format lần lượt cho chắc:
+    1. form-urlencoded giống HẸN đúng thư viện (json.dumps từng giá trị) - đã chứng minh
+       hoạt động với sendMessage
+    2. application/json body (docs chính thức)
+    3. form-urlencoded thường
     Zalo trả HTTP 200 kèm ok:false khi lỗi nghiệp vụ nên phải parse body JSON."""
+    import json as _json
+
     last_err = None
     for base in ZALO_API_BASES:
-        try:
-            resp = requests.post(
-                f"{base}/bot{BOT_TOKEN}/sendVoice",
-                json={"chat_id": chat_id, "voice_url": voice_url},
-                timeout=30,
-            )
-            body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-            if resp.status_code < 400 and body.get("ok", True):
-                return True
-            error_code = body.get("error_code")
-            description = body.get("description")
-            if error_code or description:
-                last_err = f"error_code={error_code}, description={description}"
-            else:
-                last_err = f"{resp.status_code} {resp.text[:300]}"
-        except requests.RequestException as e:
-            last_err = str(e)
+        url = f"{base}/bot{BOT_TOKEN}/sendVoice"
+        payloads = [
+            ("form-json", {"chat_id": _json.dumps(chat_id), "voice_url": _json.dumps(voice_url)}),
+            ("json", {"chat_id": chat_id, "voice_url": voice_url}),
+            ("form", {"chat_id": chat_id, "voice_url": voice_url}),
+        ]
+        for fmt, payload in payloads:
+            try:
+                if fmt == "json":
+                    resp = requests.post(url, json=payload, timeout=30)
+                else:
+                    resp = requests.post(url, data=payload, timeout=30)
+                body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+                if resp.status_code < 400 and body.get("ok", True):
+                    log(f"🎙️  sendVoice OK ({fmt}) cho {chat_id}: {resp.text[:200]}")
+                    return True
+                error_code = body.get("error_code")
+                description = body.get("description")
+                last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
+            except requests.RequestException as e:
+                last_err = f"[{fmt}] {e}"
     log(f"⚠️  Lỗi gửi voice: {last_err}")
     return False
 
@@ -584,9 +595,9 @@ async def send_media_replies(update: Update, chat_id: str, sticker_id, photo_url
             log(f"⚠️  Lỗi gửi ảnh: {e}")
     if voice_url:
         if await send_voice_message(chat_id, voice_url):
-            log(f"🎙️  Đã gửi voice cho {chat_id}")
+            log(f"🎙️  Đã gửi voice cho {chat_id} - {voice_url}")
         else:
-            log(f"⚠️  Không gửi được voice cho {chat_id}")
+            log(f"⚠️  Không gửi được voice cho {chat_id} - {voice_url}")
 
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
