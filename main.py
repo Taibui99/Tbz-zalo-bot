@@ -221,8 +221,10 @@ def build_tools():
             description=(
                 "Tạo 1 bức ảnh bằng AI theo mô tả của người dùng rồi gửi kèm vào cuộc "
                 "trò chuyện. Chỉ gọi khi người dùng nhờ vẽ/tạo ảnh (vd 'vẽ cho mình...', "
-                "'tạo ảnh...', 'ảnh một con mèo...'). Prompt phải mô tả chi tiết bằng "
-                "tiếng Việt."
+                "'tạo ảnh...', 'ảnh một con mèo...'). QUAN TRỌNG: tham số prompt phải "
+                "được DỊCH SANG TIẾNG ANH, mô tả chi tiết đầy đủ (chủ thể, hành động, "
+                "phong cách, màu sắc, bố cục) - model tạo ảnh xử lý tiếng Anh tốt hơn "
+                "nhiều lần, dịch sai ý là ảnh sai."
             ),
             parameters={
                 "type": "object",
@@ -309,7 +311,7 @@ def _fetch_pollinations_image(prompt: str):
     url = (
         "https://image.pollinations.ai/prompt/"
         + urllib.parse.quote(prompt)
-        + f"?width=1024&height=1024&nologo=true&seed={random.randint(0, 99999)}"
+        + f"?width=1024&height=1024&nologo=true&model=flux&seed={random.randint(0, 99999)}"
     )
     try:
         resp = requests.get(url, timeout=90)
