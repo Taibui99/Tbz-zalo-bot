@@ -191,8 +191,9 @@ def build_sticker_tool():
             name="send_sticker",
             description=(
                 "Gửi 1 sticker Zalo phù hợp với cảm xúc/ngữ cảnh cuộc trò chuyện hiện tại. "
-                "Chỉ gọi hàm này khi thực sự phù hợp (vd người dùng vui, buồn, đùa giỡn, "
-                "cảm ơn...), không lạm dụng, không gọi liên tục."
+                "KHI NGƯỜI DÙNG NHỜ GỬI STICKER (vd 'gửi sticker haha', 'gửi sticker vui') "
+                "thì BẮT BUỘC gọi hàm này thay vì trả lời text. Chọn mood phù hợp nhất trong "
+                "danh sách có sẵn. Không lạm dụng, không gọi liên tục."
             ),
             parameters={
                 "type": "object",
@@ -550,7 +551,10 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     sticker_id = update.message.sticker
     log(f"🎟️  Nhận sticker từ {chat_id} - mã ID: {sticker_id}")
-    await update.message.reply_text(f"Đã nhận sticker, mã ID của nó là:\n{sticker_id}")
+    await update.message.reply_text(
+        f"Đã nhận sticker, mã ID:\n{sticker_id}\n\n"
+        f"Dán vào tab Cài đặt > sticker_library (vd vui: {sticker_id}) để Gemini tự gửi sticker này."
+    )
 
 
 async def send_media_replies(update: Update, chat_id: str, sticker_id, photo_url, voice_url):
