@@ -343,18 +343,20 @@ def generate_and_store_image(prompt: str):
 
 
 def make_voice_url(text: str):
-    """TTS text -> lưu file .aac vào voice_store, trả URL công khai (cần PUBLIC_URL + ffmpeg)."""
+    """TTS text -> lưu file .aac vào voice_store, trả URL công khai (cần PUBLIC_URL).
+    API Zalo BẮT BUỘC URL phải có đuôi .aac nên route cũng đổi thành /voice/{id}.aac."""
     if not PUBLIC_URL:
         return None
     aac_bytes = voice.text_to_aac(text)
     if not aac_bytes:
         return None
     voice_id = store_voice(aac_bytes, "audio/aac")
-    return f"{PUBLIC_URL}/voice/{voice_id}"
+    return f"{PUBLIC_URL}/voice/{voice_id}.aac"
 
 
 def _send_voice_sync(chat_id: str, voice_url: str) -> bool:
-    """Gọi thẳng API sendVoice của Zalo Bot (thư viện python-zalo-bot chưa có hàm này)."""
+    """Gọi thẳng API sendVoice của Zalo Bot (thư viện python-zalo-bot chưa có hàm này).
+    Zalo trả HTTP 200 kèm ok:false khi lỗi nghiệp vụ nên phải parse body JSON."""
     last_err = None
     for base in ZALO_API_BASES:
         try:
@@ -363,9 +365,15 @@ def _send_voice_sync(chat_id: str, voice_url: str) -> bool:
                 json={"chat_id": chat_id, "voice_url": voice_url},
                 timeout=30,
             )
-            if resp.status_code < 400:
+            body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+            if resp.status_code < 400 and body.get("ok", True):
                 return True
-            last_err = f"{resp.status_code} {resp.text[:200]}"
+            error_code = body.get("error_code")
+            description = body.get("description")
+            if error_code or description:
+                last_err = f"error_code={error_code}, description={description}"
+            else:
+                last_err = f"{resp.status_code} {resp.text[:300]}"
         except requests.RequestException as e:
             last_err = str(e)
     log(f"⚠️  Lỗi gửi voice: {last_err}")
@@ -687,7 +695,7 @@ def serve_image(image_id: str):
     return Response(content=data, media_type=mime_type)
 
 
-@app.get("/voice/{voice_id}")
+@app.get("/voice/{voice_id}.aac")
 def serve_voice(voice_id: str):
     with voice_store_lock:
         entry = voice_store.get(voice_id)
