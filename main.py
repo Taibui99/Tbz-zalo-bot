@@ -192,8 +192,10 @@ def build_sticker_tool():
             description=(
                 "Gửi 1 sticker Zalo phù hợp với cảm xúc/ngữ cảnh cuộc trò chuyện hiện tại. "
                 "KHI NGƯỜI DÙNG NHỜ GỬI STICKER (vd 'gửi sticker haha', 'gửi sticker vui') "
-                "thì BẮT BUỘC gọi hàm này thay vì trả lời text. Chọn mood phù hợp nhất trong "
-                "danh sách có sẵn. Không lạm dụng, không gọi liên tục."
+                "thì BẮT BUỘC gọi hàm này thay vì trả lời text. "
+                "Các mood có sẵn: vui, haha, buon, yeu, ghet, tuc, chao, bye, woa, "
+                "camon, sinh_nhat, meme, chan, buon_ngu. Chọn mood phù hợp nhất. "
+                "Không lạm dụng, không gọi liên tục."
             ),
             parameters={
                 "type": "object",
