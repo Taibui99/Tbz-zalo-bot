@@ -109,7 +109,7 @@ SYSTEM_INSTRUCTION = (
     "này', 'điều quan trọng là phải tôn trọng...' - trả lời thẳng, tự nhiên như người "
     "thật, không máy móc, không đạo đức giả. "
     "CẤM TUYỆT ĐỐI dùng ký hiệu LaTeX/Markdown khi trình bày toán học: không dùng "
-    "$...$, \\(...\\), \frac, \cdot, \sin, \angle, \sqrt{}, dấu hoa thị đánh dấu, "
+    "$...$, \\(...\\), \\frac, \\cdot, \\sin, \\angle, \\sqrt{}, dấu hoa thị đánh dấu, "
     "dấu gạch chân, **in đậm**... Zalo không render được các ký hiệu này nên chúng "
     "hiện ra như rác. Hãy viết công thức bằng chữ và ký hiệu thường dễ đọc: ví dụ "
     "'V = 1/6', 'góc ACB = 45 độ', 'sin45° = 1/căn 2', 'AD + BC + AC/căn 2 = 3', "
