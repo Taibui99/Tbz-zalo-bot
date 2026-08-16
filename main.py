@@ -323,7 +323,7 @@ def execute_tool(name: str, args: dict, allow_voice: bool) -> tuple:
     if name == "send_sticker":
         mood = args.get("mood")
         data = storage.load_data()
-        sticker_id_to_send = data.get("sticker_library", {}).get(mood)
+        sticker_id_to_send = storage.sticker_code(data.get("sticker_library", {}).get(mood))
         result_msg = (
             "đã gửi sticker cho người dùng"
             if sticker_id_to_send
@@ -1006,7 +1006,7 @@ def api_get_settings():
         "morning_greeting": data.get("morning_greeting"),
         "location": data.get("location"),
         "schedule": data.get("schedule"),
-        "sticker_library": data.get("sticker_library", {}),
+        "sticker_library": storage.normalize_sticker_library(data.get("sticker_library", {})),
     }
 
 
@@ -1025,7 +1025,7 @@ async def api_put_settings(request: Request, body: dict):
     if "schedule" in body:
         data["schedule"] = body["schedule"]
     if "sticker_library" in body:
-        data["sticker_library"] = body["sticker_library"]
+        data["sticker_library"] = storage.normalize_sticker_library(body["sticker_library"])
         # xoá session cache để phiên chat mới nhất định biết các sticker mới cài
         chat_sessions.clear()
         log("🎟️  Đã cập nhật thư viện sticker, các phiên chat sẽ dùng bộ mới từ tin nhắn tiếp theo")
@@ -1125,8 +1125,8 @@ async def api_test_send(request: Request):
         sticker_id = str(body.get("sticker_id") or "").strip()
         if not sticker_id:
             mood = str(body.get("mood") or "").strip()
-            entry = storage.load_data().get("sticker_library", {}).get(mood) or {}
-            sticker_id = str(entry.get("sticker_id") or entry.get("verified_code") or "").strip()
+            entry = storage.load_data().get("sticker_library", {}).get(mood)
+            sticker_id = storage.sticker_code(entry)
         if not sticker_id:
             return JSONResponse(
                 content={"success": False, "error": "Không tìm thấy sticker (thiếu sticker_id hoặc mood sai)"},

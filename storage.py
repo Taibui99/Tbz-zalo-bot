@@ -56,6 +56,31 @@ DEFAULT_DATA = {
 }
 
 
+def sticker_code(entry) -> str:
+    """Trích mã sticker từ 1 entry — chấp nhận cả 2 định dạng đang tồn tại:
+    - chuỗi cũ: "3eb5aad796927fcc2683"
+    - dict mới: {"sticker_id": "...", "verified_code": "..."}
+    Ưu tiên verified_code (mã đã xác minh gửi được) rồi mới đến sticker_id."""
+    if isinstance(entry, dict):
+        return str(entry.get("verified_code") or entry.get("sticker_id") or "")
+    return str(entry or "")
+
+
+def normalize_sticker_library(library) -> dict:
+    """Chuẩn hoá sticker_library về định dạng dict cho web mới:
+    {"mood": {"sticker_id": "...", "verified_code": "..."}}.
+    Entry chuỗi cũ sẽ được nhân đôi mã vào cả 2 field."""
+    out = {}
+    for mood, entry in (library or {}).items():
+        code = sticker_code(entry)
+        if isinstance(entry, dict):
+            sid = str(entry.get("sticker_id") or code)
+        else:
+            sid = code
+        out[mood] = {"sticker_id": sid, "verified_code": code}
+    return out
+
+
 def load_data() -> dict:
     with _lock:
         if not os.path.exists(DATA_FILE):
@@ -71,7 +96,7 @@ def load_data() -> dict:
             # seed trước đó (không xác minh được trên site chính thức).
             fake_codes = {"d063f44dc80821567819", "bfe458bf64fa8da4d4eb"}
             library = merged.get("sticker_library") or {}
-            library = {k: v for k, v in library.items() if v not in fake_codes}
+            library = {k: v for k, v in library.items() if sticker_code(v) not in fake_codes}
             if not library:
                 library = json.loads(json.dumps(DEFAULT_DATA["sticker_library"]))
             merged["sticker_library"] = library
