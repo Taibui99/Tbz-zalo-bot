@@ -19,8 +19,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 import uuid
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from google import genai
 from google.genai import errors, types
 
@@ -69,6 +69,11 @@ ZALO_API_BASES = [
 # Nếu chưa set, tự động dùng RENDER_EXTERNAL_URL do Render cấp sẵn.
 PUBLIC_URL = os.environ.get("PUBLIC_URL") or os.environ.get("RENDER_EXTERNAL_URL") or ""
 PUBLIC_URL = PUBLIC_URL.rstrip("/")
+
+# Token quản trị TÙY CHỌN để bảo vệ các endpoint nhạy cảm của web (sửa cài đặt,
+# test gửi, reset, xem log). Nếu để trống thì ai có link cũng dùng được - giữ
+# hành vi cũ. Web Tbz-Bot-Web phải gửi kèm header X-Admin-Token cùng giá trị này.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
 
 # Lưu ảnh AI vừa tạo trong RAM để phục vụ qua route /img/{id} - chỉ giữ tối đa
 # 50 ảnh gần nhất, ảnh cũ tự bị đẩy ra (không cần dọn dẹp thủ công)
@@ -181,6 +186,8 @@ def record_conversation(chat_id, display_name, msg_type, user_text, bot_reply, s
             "received_at": received_at.strftime("%H:%M:%S"),
             "responded_at": responded_at.strftime("%H:%M:%S"),
             "duration": round(duration, 1),
+            # mốc giờ đầy đủ (epoch) để dashboard vẽ biểu đồ theo ngày thật
+            "received_ts": received_at.timestamp(),
         })
     with stats_lock:
         unique_users.add(chat_id)
@@ -558,6 +565,71 @@ def _send_sticker_sync(chat_id: str, sticker_id: str) -> bool:
             except requests.RequestException as e:
                 last_err = f"[{fmt}] {e}"
     log(f"⚠️  Lỗi gửi sticker ({sticker_id}): {last_err}")
+    return False
+
+
+def _send_text_sync(chat_id: str, text: str) -> bool:
+    """Gửi text qua API trực tiếp cho endpoint /api/test/send (dashboard)."""
+    import json as _json
+
+    last_err = None
+    for base in ZALO_API_BASES:
+        url = f"{base}/bot{BOT_TOKEN}/sendMessage"
+        payloads = [
+            ("form-json", {"chat_id": _json.dumps(chat_id), "message": _json.dumps(text)}),
+            ("json", {"chat_id": chat_id, "message": text}),
+            ("form", {"chat_id": chat_id, "message": text}),
+        ]
+        for fmt, payload in payloads:
+            try:
+                if fmt == "json":
+                    resp = requests.post(url, json=payload, timeout=30)
+                else:
+                    resp = requests.post(url, data=payload, timeout=30)
+                body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+                if resp.status_code < 400 and body.get("ok", True):
+                    log(f"💬  sendMessage OK ({fmt}) cho {chat_id}: {resp.text[:200]}")
+                    return True
+                error_code = body.get("error_code")
+                description = body.get("description")
+                last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
+            except requests.RequestException as e:
+                last_err = f"[{fmt}] {e}"
+    log(f"⚠️  Lỗi gửi text: {last_err}")
+    return False
+
+
+def _send_photo_sync(chat_id: str, photo_url: str) -> bool:
+    """Gửi ảnh (URL công khai) qua API trực tiếp cho /api/test/send (dashboard)."""
+    import json as _json
+
+    last_err = None
+    for base in ZALO_API_BASES:
+        url = f"{base}/bot{BOT_TOKEN}/sendPhoto"
+        payloads = [
+            (
+                "form-json",
+                {"chat_id": _json.dumps(chat_id), "photo": _json.dumps(photo_url), "caption": _json.dumps("")},
+            ),
+            ("json", {"chat_id": chat_id, "photo": photo_url, "caption": ""}),
+            ("form", {"chat_id": chat_id, "photo": photo_url, "caption": ""}),
+        ]
+        for fmt, payload in payloads:
+            try:
+                if fmt == "json":
+                    resp = requests.post(url, json=payload, timeout=60)
+                else:
+                    resp = requests.post(url, data=payload, timeout=60)
+                body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+                if resp.status_code < 400 and body.get("ok", True):
+                    log(f"🖼️  sendPhoto OK ({fmt}) cho {chat_id}: {resp.text[:200]}")
+                    return True
+                error_code = body.get("error_code")
+                description = body.get("description")
+                last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
+            except requests.RequestException as e:
+                last_err = f"[{fmt}] {e}"
+    log(f"⚠️  Lỗi gửi ảnh: {last_err}")
     return False
 
 
@@ -939,18 +1011,21 @@ def api_get_settings():
 
 
 @app.put("/api/settings")
-async def api_put_settings(request: dict):
+async def api_put_settings(request: Request, body: dict):
+    guard = _admin_guard(request)
+    if guard:
+        return guard
     data = storage.load_data()
-    if "owner_chat_id" in request:
-        data["owner_chat_id"] = request["owner_chat_id"] or None
-    if "morning_greeting" in request:
-        data["morning_greeting"] = request["morning_greeting"]
-    if "location" in request:
-        data["location"] = request["location"]
-    if "schedule" in request:
-        data["schedule"] = request["schedule"]
-    if "sticker_library" in request:
-        data["sticker_library"] = request["sticker_library"]
+    if "owner_chat_id" in body:
+        data["owner_chat_id"] = body["owner_chat_id"] or None
+    if "morning_greeting" in body:
+        data["morning_greeting"] = body["morning_greeting"]
+    if "location" in body:
+        data["location"] = body["location"]
+    if "schedule" in body:
+        data["schedule"] = body["schedule"]
+    if "sticker_library" in body:
+        data["sticker_library"] = body["sticker_library"]
         # xoá session cache để phiên chat mới nhất định biết các sticker mới cài
         chat_sessions.clear()
         log("🎟️  Đã cập nhật thư viện sticker, các phiên chat sẽ dùng bộ mới từ tin nhắn tiếp theo")
@@ -960,13 +1035,20 @@ async def api_put_settings(request: dict):
 
 
 @app.get("/api/conversations")
-def api_conversations():
+def api_conversations(request: Request):
+    guard = _admin_guard(request)
+    if guard:
+        return guard
     with conv_lock:
         return {"conversations": list(reversed(conversations))}
 
 
 @app.get("/api/logs/stream")
-async def stream_logs():
+async def stream_logs(request: Request):
+    guard = _admin_guard(request)
+    if guard:
+        return guard
+
     async def event_generator():
         last_sent_index = 0
         while True:
@@ -979,6 +1061,129 @@ async def stream_logs():
             await asyncio.sleep(1)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+def _admin_guard(request: Request):
+    """Chặn truy cập nếu đã cấu hình ADMIN_TOKEN mà request thiếu/không đúng
+    header X-Admin-Token. Nếu ADMIN_TOKEN chưa cấu hình thì ai cũng vào được."""
+    if not ADMIN_TOKEN:
+        return None
+    if request.headers.get("X-Admin-Token") != ADMIN_TOKEN:
+        return JSONResponse(content={"success": False, "error": "Sai hoặc thiếu ADMIN_TOKEN"}, status_code=403)
+    return None
+
+
+@app.get("/api/config")
+def api_config(request: Request):
+    guard = _admin_guard(request)
+    if guard:
+        return guard
+    data = storage.load_data()
+    return {
+        "model": GEMINI_MODEL,
+        "voice": voice.DEFAULT_VOICE,
+        "voice_rate": voice.DEFAULT_RATE,
+        "public_url": PUBLIC_URL or None,
+        "sticker_count": len(data.get("sticker_library", {})),
+        "sticker_moods": list(data.get("sticker_library", {}).keys()),
+        "admin_enabled": bool(ADMIN_TOKEN),
+    }
+
+
+@app.post("/api/test/send")
+async def api_test_send(request: Request):
+    """Gửi 1 tin thử (text/sticker/voice/image) về owner_chat_id (hoặc chat_id được
+    chỉ định) từ dashboard - để chủ bot kiểm tra sticker/voice/ảnh hoạt động tốt."""
+    guard = _admin_guard(request)
+    if guard:
+        return guard
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(content={"success": False, "error": "Body phải là JSON"}, status_code=400)
+
+    chat_id = str(body.get("chat_id") or "").strip() or storage.load_data().get("owner_chat_id")
+    if not chat_id:
+        return JSONResponse(
+            content={
+                "success": False,
+                "error": "Chưa có owner_chat_id - gửi 1 tin nhắn cho bot trước rồi thử lại",
+            },
+            status_code=400,
+        )
+    chat_id = str(chat_id)
+
+    msg_type = body.get("type", "text")
+    result = {"chat_id": chat_id}
+    if msg_type == "text":
+        text = str(body.get("text") or "").strip()
+        if not text:
+            return JSONResponse(content={"success": False, "error": "Thiếu text"}, status_code=400)
+        ok = await asyncio.to_thread(_send_text_sync, chat_id, text)
+        result.update(ok=ok, kind="text")
+    elif msg_type == "sticker":
+        sticker_id = str(body.get("sticker_id") or "").strip()
+        if not sticker_id:
+            mood = str(body.get("mood") or "").strip()
+            entry = storage.load_data().get("sticker_library", {}).get(mood) or {}
+            sticker_id = str(entry.get("sticker_id") or entry.get("verified_code") or "").strip()
+        if not sticker_id:
+            return JSONResponse(
+                content={"success": False, "error": "Không tìm thấy sticker (thiếu sticker_id hoặc mood sai)"},
+                status_code=400,
+            )
+        ok = await asyncio.to_thread(_send_sticker_sync, chat_id, sticker_id)
+        result.update(ok=ok, kind="sticker", sticker_id=sticker_id)
+    elif msg_type == "voice":
+        text = str(body.get("text") or "").strip()
+        if not text:
+            return JSONResponse(content={"success": False, "error": "Thiếu text để đọc thành voice"}, status_code=400)
+        voice_url = await asyncio.to_thread(make_voice_url, text)
+        if not voice_url:
+            return JSONResponse(
+                content={"success": False, "error": "Không tạo được voice (thiếu PUBLIC_URL / lỗi TTS)"},
+                status_code=400,
+            )
+        ok = await asyncio.to_thread(_send_voice_sync, chat_id, voice_url)
+        result.update(ok=ok, kind="voice", voice_url=voice_url)
+    elif msg_type == "image":
+        prompt = str(body.get("text") or "").strip()
+        if not prompt:
+            return JSONResponse(content={"success": False, "error": "Thiếu text (mô tả ảnh)"}, status_code=400)
+        photo_url = await asyncio.to_thread(generate_and_store_image, prompt)
+        if not photo_url:
+            return JSONResponse(
+                content={"success": False, "error": "Không tạo được ảnh (thiếu PUBLIC_URL?)"},
+                status_code=400,
+            )
+        ok = await asyncio.to_thread(_send_photo_sync, chat_id, photo_url)
+        result.update(ok=ok, kind="image", photo_url=photo_url)
+    else:
+        return JSONResponse(
+            content={"success": False, "error": f"Không hỗ trợ type={msg_type} (dùng text/sticker/voice/image)"},
+            status_code=400,
+        )
+
+    log(f"🧪 Test gửi ({result['kind']}) cho {chat_id} từ dashboard: {'OK' if ok else 'THẤT BẠI'}")
+    return {"success": True, **result}
+
+
+@app.post("/api/reset")
+async def api_reset(request: Request):
+    """Xoá ngữ cảnh (session) của 1 chat cụ thể từ dashboard."""
+    guard = _admin_guard(request)
+    if guard:
+        return guard
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    chat_id = str(body.get("chat_id") or "").strip()
+    if not chat_id:
+        return JSONResponse(content={"success": False, "error": "Thiếu chat_id"}, status_code=400)
+    removed = chat_sessions.pop(chat_id, None)
+    log(f"🧹 Reset ngữ cảnh cho {chat_id} từ dashboard (có phiên: {removed is not None})")
+    return {"success": True, "had_session": removed is not None, "chat_id": chat_id}
 
 
 @app.get("/", response_class=HTMLResponse)
