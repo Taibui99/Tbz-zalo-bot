@@ -594,6 +594,19 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
                 log(f"⚠️  Gemini trả text RỖNG - finish_reason={fr}, part_types={part_types}")
             except Exception as e:
                 log(f"⚠️  Gemini trả text rỗng (không chẩn đoán được: {e})")
+            # Tự động nhắc lại 1 lần: vài model thinking chỉ trả thought-part nên
+            # text rỗng, câu nhắc sau thường ép model phát ra câu trả lời thật.
+            try:
+                nudge = session.send_message(
+                    "[Bạn vừa không trả lời gì cả. Hãy trả lời lại câu trước đó một "
+                    "cách tự nhiên, đầy đủ. KHÔNG nhắc lại lời này.]"
+                )
+                text = _extract_response_text(nudge)
+                if text:
+                    log("♻️  Đã lấy lại câu trả lời bằng cách nhắc lại")
+            except Exception as e:
+                log(f"⚠️  Nhắc lại thất bại: {e}")
+        if not text:
             text = "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
         return text, sticker_id_to_send, photo_url_to_send, voice_url_to_send
     except errors.ClientError as e:
