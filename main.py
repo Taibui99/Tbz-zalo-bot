@@ -155,7 +155,14 @@ SYSTEM_INSTRUCTION = (
     "tìm đúng tài liệu, rồi fetch_url đọc nội dung thật, sau đó mới giải/trả lời từ "
     "nội dung đó. Nếu người dùng tự dán link, dùng thẳng fetch_url để đọc. Kết quả "
     "search là dữ liệu thật từ internet, hãy phân biệt rõ đâu là nội dung tài liệu "
-    "tìm được đâu là suy luận của bạn."
+    "tìm được đâu là suy luận của bạn. "
+    "QUY TẮC VÀNG: TUYỆT ĐỐI KHÔNG được khẳng định 'đề chưa công bố', 'không tìm "
+    "thấy', 'chưa có trên mạng', 'nằm trong tủ khóa' dựa vào TRÍ NHỚ của bạn. Khi "
+    "người dùng hỏi về đề thi/tài liệu/sự kiện có mốc thời gian, bạn BẮT BUỘC gọi "
+    "search_web để kiểm tra thực tế trước khi kết luận, vì kiến thức của bạn có thể "
+    "cũ hơn thực tế. Nếu thấy kết quả tìm kiếm đã được nhét sẵn vào ngữ cảnh (dòng "
+    "'[KẾT QUẢ TRA CỨU MẠNG...]'), thì dùng chính dữ liệu đó để trả lời, không cần "
+    "gọi search lại trừ khi cần thông tin khác."
 )
 
 # ============================================================
@@ -264,10 +271,11 @@ VOICE_TOOL_DESC = (
 SEARCH_TOOL_DESC = (
     "Tìm kiếm trên internet theo 1 truy vấn để lấy thông tin/đề/tài liệu mới "
     "nhất hoặc nằm ngoài kiến thức của bạn. Trả về danh sách kết quả kèm tiêu đề, "
-    "link, trích đoạn. Dùng khi: người dùng hỏi sự kiện/kiến thức mới, yêu cầu "
-    "'tra cứu', 'tìm đề', 'tìm tài liệu', 'google thử', hoặc nhờ làm 1 đề thi cụ "
-    "thể (VOI/IOI/THPT...) mà bạn không chắc nội dung. SAU KHI tìm thấy link phù "
-    "hợp, gọi tiếp fetch_url để đọc nội dung đầy đủ rồi mới trả lời/giải."
+    "link, trích đoạn. BẮT BUỘC gọi khi: người dùng nhờ 'tra/tìm kiếm/google' bất "
+    "cứ thứ gì, hỏi về đề thi/tài liệu (VOI/IOI/HSG/THPT/OLP/chuyên/2024/2025/2026...), "
+    "sự kiện mới, hoặc bạn không chắc nội dung. KHÔNG được trả lời kiểu 'chưa có/chưa "
+    "công bố' nếu chưa gọi hàm này. SAU KHI tìm thấy link phù hợp, gọi tiếp fetch_url "
+    "để đọc nội dung đầy đủ rồi mới trả lời/giải."
 )
 FETCH_TOOL_DESC = (
     "Tải 1 URL (trang web, PDF, Google Docs...) và trích nội dung dạng text về. "
@@ -360,6 +368,25 @@ def search_web(query: str) -> str:
             out.append(f"- {title} | {url} | {snippet}")
         if out:
             return "\n".join(out)
+        # Fallback: DuckDuckGo Instant Answer API (không cần key, hay trả abstract/wiki)
+        try:
+            resp3 = requests.get(
+                "https://api.duckduckgo.com/",
+                params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
+                headers={"User-Agent": _SEARCH_UA},
+                timeout=_SEARCH_TIMEOUT,
+            )
+            data3 = resp3.json()
+            lines = []
+            if data3.get("AbstractText"):
+                lines.append(f"- {data3.get('AbstractText', '')[:400]} | {data3.get('AbstractURL') or ''} | (Wikipedia)")
+            for t in (data3.get("RelatedTopics") or [])[:5]:
+                if isinstance(t, dict) and t.get("Text"):
+                    lines.append(f"- {t['Text'][:300]} | {t.get('FirstURL') or ''}")
+            if lines:
+                return "\n".join(lines)
+        except Exception as e:
+            log(f"⚠️  DuckDuckGo IA API lỗi: {e}")
         return "Không tìm thấy kết quả nào cho truy vấn này."
     except Exception as e:
         log(f"⚠️  search_web lỗi: {e}")
@@ -421,6 +448,77 @@ def fetch_url_text(url: str) -> str:
     except Exception as e:
         log(f"⚠️  fetch_url lỗi {url}: {e}")
         return "Lỗi khi tải nội dung (mạng/trang chặn bot), hãy thử link khác."
+
+
+# ============================================================
+# AUTO SEARCH: tự tra cứu web khi người dùng có ý định tra/tìm/giải đề.
+# Lý do: Gemini không phải lúc nào cũng chịu gọi search_web (nhất là flash-lite),
+# nên nếu thấy dấu hiệu 'tra cứu' là search trước rồi nhét kết quả vào ngữ cảnh.
+# ============================================================
+_AUTO_SEARCH_EXAM = re.compile(
+    r"(đề\s*thi|đề\s*kiểm\s*tra|đề\s+cương|đề\s+bài|bài\s*thi|đáp\s*án|tài\s*liệu|"
+    r"vnoi|voi|ioi|olp|hsg|thptqg|thpt|chuyên|tuyển\s*sinh|thi\s+\w+\s+202[0-9])",
+    re.IGNORECASE,
+)
+_AUTO_SEARCH_WORD = re.compile(
+    r"(^|\s)(tra|tìm|kiếm|search|google)(\s|đi|giúp|thử|hộ|mạng|web|nè|nha|nhé|em|bro)?($|\s)",
+    re.IGNORECASE,
+)
+_AUTO_SEARCH_YEAR = re.compile(r"\b20(2[4-9]|3[0-9])\b")
+_AUTO_SEARCH_NOISE = re.compile(
+    r"(@\S+|https?://\S+|cx|cũng|ko|không|đc|hả|đi|nào|thử|thế|với|kìa|ấy|ngay|luôn|vừa|rồi|lại|cho|bro|bạn|mình)",
+    re.IGNORECASE,
+)
+
+
+def should_auto_search(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_AUTO_SEARCH_EXAM.search(text) or _AUTO_SEARCH_WORD.search(text) or _AUTO_SEARCH_YEAR.search(text))
+
+
+def build_search_query(text: str) -> str:
+    q = _AUTO_SEARCH_NOISE.sub(" ", text)
+    q = re.sub(r"\s+", " ", q).strip()
+    if _AUTO_SEARCH_EXAM.search(text) and "đề" in q and "thi" not in q:
+        q = q.replace("đề", "đề thi", 1)
+    return q or text.strip()
+
+
+def _maybe_search_context(parts: list) -> str | None:
+    """Nếu tin nhắn có dấu hiệu 'tra cứu đề/tài liệu/sự kiện' thì tự tìm trên mạng
+    và trả 1 phần ngữ cảnh kèm kết quả thật cho Gemini (đảm bảo nó không tự bịa)."""
+    user_text = _user_text_from_parts(parts)
+    if not should_auto_search(user_text):
+        return None
+    query = build_search_query(user_text)
+    log(f"🌐 Tự động tra cứu web: {query!r}")
+    results = search_web(query)
+    if not results or results.startswith(("Lỗi", "Không tìm thấy")):
+        log(f"🌐 Tra cứu tự động không có kết quả: {results}")
+        # Vẫn nhét 1 context để Gemini KHÔNG được khẳng định "chưa có/chưa công bố"
+        # dựa vào trí nhớ khi tra cứu thất bại - thành thật nói với người dùng.
+        return (
+            "[Bối cảnh hệ thống: Đã tự tra cứu mạng nhưng KHÔNG lấy được kết quả khả "
+            "dụng (mạng bị chặn/không tìm thấy). TUYỆT ĐỐI không khẳng định 'đề chưa "
+            "công bố', 'chưa có trên mạng' như kiến thức chắc chắn - vì có thể là lỗi "
+            "tra cứu. Hãy nói thật với người dùng là bot chưa tra được, và nhờ họ gửi "
+            "link/ảnh tài liệu để bạn đọc và giải trực tiếp.]"
+        )
+    return (
+        "[Bối cảnh hệ thống: ĐÂY LÀ KẾT QUẢ TRA CỨU MẠNG THẬT vừa tìm tự động theo "
+        "yêu cầu của người dùng. Hãy dựa vào dữ liệu này để trả lời/giải, đừng dùng "
+        "trí nhớ cũ. Nếu cần đề/tài liệu đầy đủ, hãy gọi fetch_url với link phù hợp "
+        "nhất trong danh sách để đọc nội dung thật rồi mới giải.\n"
+        f"{results}]"
+    )
+
+
+def _user_text_from_parts(parts: list) -> str:
+    """Gom text của NGƯỜI DÙNG từ parts, bỏ qua các chuỗi hệ thống bắt đầu bằng '['."""
+    return "\n".join(
+        p for p in parts if isinstance(p, str) and not p.lstrip().startswith("[")
+    ).strip()
 
 
 def sticker_moods() -> list:
@@ -869,6 +967,11 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
         # Gắn kèm ngày giờ thật vào MỖI lần gọi (không chỉ lúc tạo session), vì
         # session có thể được dùng lại nhiều giờ/nhiều ngày sau lúc tạo.
         parts_with_time = [build_time_context()] + list(parts)
+        # Auto search: nếu người dùng nhờ tra/tìm đề/tài liệu thì tra trước rồi nhét
+        # kết quả thật vào ngữ cảnh - đảm bảo Gemini không tự bịa "chưa có" từ trí nhớ.
+        search_ctx = _maybe_search_context(parts)
+        if search_ctx:
+            parts_with_time.insert(0, search_ctx)
         response = session.send_message(parts_with_time)
 
         if response.function_calls:
