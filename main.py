@@ -8,8 +8,10 @@ Kiến trúc:
 """
 
 import asyncio
+import io
 import os
 import random
+import re
 import threading
 import time
 import urllib.parse
@@ -19,7 +21,9 @@ from zoneinfo import ZoneInfo
 
 import requests
 import uuid
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, Request
+from pypdf import PdfReader
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from google import genai
 from google.genai import errors, types
@@ -74,6 +78,11 @@ PUBLIC_URL = PUBLIC_URL.rstrip("/")
 # test gửi, reset, xem log). Nếu để trống thì ai có link cũng dùng được - giữ
 # hành vi cũ. Web Tbz-Bot-Web phải gửi kèm header X-Admin-Token cùng giá trị này.
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
+
+# Key TÙY CHỌN cho API tìm kiếm Tavily (https://tavily.com - có free tier).
+# Nếu set: bot tra cứu web bằng Tavily (ổn định, kết quả sạch). Không set: bot
+# tự scrape DuckDuckGo (miễn phí, không cần key) - đủ dùng nhưng dễ bị chặn hơn.
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
 
 # Lưu ảnh AI vừa tạo trong RAM để phục vụ qua route /img/{id} - chỉ giữ tối đa
 # 50 ảnh gần nhất, ảnh cũ tự bị đẩy ra (không cần dọn dẹp thủ công)
@@ -139,7 +148,14 @@ SYSTEM_INSTRUCTION = (
     "hãy so sánh các mốc thời gian đó để trả lời chính xác, đừng đoán mò. "
     "Bạn có các tool gửi sticker, tạo ảnh và gửi voice: hãy dùng chúng theo ngữ cảnh "
     "cuộc trò chuyện (vui thì sticker vui, tâm sự buồn thì sticker buồn, được nhờ vẽ ảnh "
-    "thì tạo ảnh...), đừng chỉ chờ người dùng nhờ."
+    "thì tạo ảnh...), đừng chỉ chờ người dùng nhờ. "
+    "Bạn còn có tool search_web (tra internet) và fetch_url (đọc nội dung 1 link): "
+    "Khi người dùng hỏi sự kiện mới, hỏi kiến thức ngoài phạm vi, hoặc nhờ làm 1 đề "
+    "thi/tài liệu cụ thể (VD 'làm đề VOI/IOI 2024') thì ĐỪNG bịa - hãy search_web để "
+    "tìm đúng tài liệu, rồi fetch_url đọc nội dung thật, sau đó mới giải/trả lời từ "
+    "nội dung đó. Nếu người dùng tự dán link, dùng thẳng fetch_url để đọc. Kết quả "
+    "search là dữ liệu thật từ internet, hãy phân biệt rõ đâu là nội dung tài liệu "
+    "tìm được đâu là suy luận của bạn."
 )
 
 # ============================================================
@@ -245,6 +261,166 @@ VOICE_TOOL_DESC = (
     "gọn, tự nhiên như lời nói. Chỉ hoạt động trong chat 1-1, không gọi cho "
     "nhóm."
 )
+SEARCH_TOOL_DESC = (
+    "Tìm kiếm trên internet theo 1 truy vấn để lấy thông tin/đề/tài liệu mới "
+    "nhất hoặc nằm ngoài kiến thức của bạn. Trả về danh sách kết quả kèm tiêu đề, "
+    "link, trích đoạn. Dùng khi: người dùng hỏi sự kiện/kiến thức mới, yêu cầu "
+    "'tra cứu', 'tìm đề', 'tìm tài liệu', 'google thử', hoặc nhờ làm 1 đề thi cụ "
+    "thể (VOI/IOI/THPT...) mà bạn không chắc nội dung. SAU KHI tìm thấy link phù "
+    "hợp, gọi tiếp fetch_url để đọc nội dung đầy đủ rồi mới trả lời/giải."
+)
+FETCH_TOOL_DESC = (
+    "Tải 1 URL (trang web, PDF, Google Docs...) và trích nội dung dạng text về. "
+    "Dùng sau search_web để đọc đầy đủ đề/tài liệu, hoặc khi người dùng dán link "
+    "muốn bạn đọc. Với đề thi/đoạn văn dài, đọc xong hãy TÓM TẮT/GIẢI dựa trên "
+    "nội dung thật, đừng bịa."
+)
+
+
+# ============================================================
+# TRA CỨU WEB: search_web + fetch_url (để bot tìm đúng tài liệu & giải đề thật)
+# ============================================================
+_SEARCH_TIMEOUT = 25
+_FETCH_TIMEOUT = 30
+_FETCH_MAX_BYTES = 5 * 1024 * 1024  # 5MB - giới hạn để tránh tải file khổng lồ
+_TEXT_MAX_CHARS = 40000
+_SEARCH_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def _collapse_whitespace(text: str) -> str:
+    return re.sub(r"[ \t\r\f\v]+", " ", text).replace("\n ", "\n").strip()
+
+
+def search_web(query: str) -> str:
+    """Tìm kiếm internet, trả text kết quả cho Gemini. Ưu tiên Tavily nếu có key,
+    nếu không scrape DuckDuckGo (không cần key)."""
+    query = (query or "").strip()
+    if not query:
+        return "Lỗi: không có truy vấn."
+    if TAVILY_API_KEY:
+        try:
+            resp = requests.post(
+                "https://api.tavily.com/search",
+                json={"api_key": TAVILY_API_KEY, "query": query, "max_results": 6, "include_answer": True},
+                timeout=_SEARCH_TIMEOUT,
+            )
+            data = resp.json()
+            answer = data.get("answer") or ""
+            lines = [f"Tóm tắt: {answer}"] if answer else []
+            for r in data.get("results", [])[:6]:
+                lines.append(f"- {r.get('title', '')} | {r.get('url', '')} | {r.get('content', '')[:300]}")
+            return "\n".join(lines) if lines else "Không tìm thấy kết quả nào."
+        except Exception as e:
+            log(f"⚠️  Tavily lỗi, thử DuckDuckGo: {e}")
+    # Scrape DuckDuckGo HTML
+    try:
+        resp = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers={"User-Agent": _SEARCH_UA},
+            timeout=_SEARCH_TIMEOUT,
+        )
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = []
+        for a in soup.select("a.result__a")[:6]:
+            href = a.get("href", "")
+            m = re.search(r"uddg=([^&]+)", href)
+            url = urllib.parse.unquote(m.group(1)) if m else href
+            title = _collapse_whitespace(a.get_text(" ", strip=True))
+            parent = a.find_parent("div", class_="result")
+            snippet = ""
+            if parent:
+                sn = parent.select_one(".result__snippet")
+                snippet = _collapse_whitespace(sn.get_text(" ", strip=True)) if sn else ""
+            results.append(f"- {title} | {url} | {snippet}")
+        if results:
+            return "\n".join(results)
+        # Endpoint lite (markup khác) nếu html không ra
+        resp2 = requests.get(
+            "https://lite.duckduckgo.com/lite/",
+            params={"q": query},
+            headers={"User-Agent": _SEARCH_UA},
+            timeout=_SEARCH_TIMEOUT,
+        )
+        soup2 = BeautifulSoup(resp2.text, "html.parser")
+        rows = soup2.select("table.result") or soup2.select("div.result")
+        out = []
+        for row in rows[:6]:
+            link = row.find("a")
+            if not link:
+                continue
+            url = link.get("href", "")
+            title = _collapse_whitespace(link.get_text(" ", strip=True))
+            snippet = ""
+            sn = row.select_one(".result-snippet")
+            snippet = _collapse_whitespace(sn.get_text(" ", strip=True)) if sn else ""
+            out.append(f"- {title} | {url} | {snippet}")
+        if out:
+            return "\n".join(out)
+        return "Không tìm thấy kết quả nào cho truy vấn này."
+    except Exception as e:
+        log(f"⚠️  search_web lỗi: {e}")
+        return "Lỗi tìm kiếm (mạng/rate-limit), hãy báo người dùng thử lại sau."
+
+
+def _fetch_text(url: str, timeout: int = _FETCH_TIMEOUT) -> str:
+    """Tải URL và trích text. Xử lý HTML, PDF, Google Docs, text thuần."""
+    resp = requests.get(url, headers={"User-Agent": _SEARCH_UA}, timeout=timeout, stream=True)
+    resp.raise_for_status()
+    content_type = (resp.headers.get("Content-Type") or "").lower()
+    data = b""
+    for chunk in resp.iter_content(65536):
+        data += chunk
+        if len(data) > _FETCH_MAX_BYTES:
+            raise ValueError("File quá lớn (>5MB), bỏ qua.")
+    if "pdf" in content_type or url.lower().endswith(".pdf"):
+        try:
+            reader = PdfReader(io.BytesIO(data))
+            parts = [f"PDF: {reader.metadata.title if reader.metadata and reader.metadata.title else url}"]
+            for i, page in enumerate(reader.pages[:60]):
+                parts.append(f"\n--- Trang {i + 1} ---\n{page.extract_text() or ''}")
+            return _collapse_whitespace("\n".join(parts))
+        except Exception as e:
+            log(f"⚠️  Đọc PDF lỗi: {e}")
+            return "Lỗi khi đọc PDF, không trích được nội dung."
+    # stream=True đã tiêu thụ nội dung -> phải decode từ bytes `data`, không dùng resp.text
+    try:
+        text = data.decode(resp.encoding or "utf-8", errors="replace")
+    except Exception:
+        text = data.decode("utf-8", errors="replace")
+    if "html" in content_type:
+        soup = BeautifulSoup(text, "html.parser")
+        for tag in soup(["script", "style", "noscript", "svg", "nav", "footer"]):
+            tag.decompose()
+        title = soup.title.get_text(" ", strip=True) if soup.title else ""
+        body = soup.get_text("\n", strip=True)
+        body = _collapse_whitespace(body)
+        return f"Tiêu đề: {title}\n\n{body}" if title else body
+    return _collapse_whitespace(text)
+
+
+def fetch_url_text(url: str) -> str:
+    """Wrapper fetch_url với kiểm tra URL + giới hạn độ dài, trả text sẵn cho Gemini."""
+    url = (url or "").strip()
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return "Lỗi: URL không hợp lệ (phải bắt đầu bằng http:// hoặc https://)."
+    # Google Docs: dùng link export plain-text thay vì parse JS
+    if "docs.google.com/document" in parsed.netloc + parsed.path:
+        m = re.search(r"/document/d/([^/]+)", url)
+        if m:
+            url = f"https://docs.google.com/document/d/{m.group(1)}/export?format=txt"
+    try:
+        text = _fetch_text(url)
+        if len(text) > _TEXT_MAX_CHARS:
+            text = text[:_TEXT_MAX_CHARS] + "\n...[bị cắt do quá dài]"
+        return text
+    except Exception as e:
+        log(f"⚠️  fetch_url lỗi {url}: {e}")
+        return "Lỗi khi tải nội dung (mạng/trang chặn bot), hãy thử link khác."
 
 
 def sticker_moods() -> list:
@@ -313,6 +489,34 @@ def build_tools():
                 "required": ["text"],
             },
         ),
+        types.FunctionDeclaration(
+            name="search_web",
+            description=SEARCH_TOOL_DESC,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Truy vấn tìm kiếm, ngắn gọn như gõ Google (vd 'đề thi VOI 2024 tin học')",
+                    }
+                },
+                "required": ["query"],
+            },
+        ),
+        types.FunctionDeclaration(
+            name="fetch_url",
+            description=FETCH_TOOL_DESC,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL đầy đủ (http/https) cần đọc nội dung",
+                    }
+                },
+                "required": ["url"],
+            },
+        ),
     ]))
     return tools
 
@@ -352,6 +556,10 @@ def execute_tool(name: str, args: dict, allow_voice: bool) -> tuple:
             )
         else:
             result_msg = "không gửi được voice vì cuộc trò chuyện này là nhóm"
+    elif name == "search_web":
+        result_msg = search_web(args.get("query", ""))
+    elif name == "fetch_url":
+        result_msg = fetch_url_text(args.get("url", ""))
     else:
         result_msg = "không hiểu tool, bỏ qua"
     log(f"🔧 Kết quả tool {name}: {result_msg}")
@@ -664,17 +872,24 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
         response = session.send_message(parts_with_time)
 
         if response.function_calls:
-            function_responses = []
-            for fc in response.function_calls:
-                result_msg, s_id, p_url, v_url = execute_tool(fc.name, dict(fc.args), allow_voice)
-                sticker_id_to_send = sticker_id_to_send or s_id
-                photo_url_to_send = photo_url_to_send or p_url
-                voice_url_to_send = voice_url_to_send or v_url
-                function_responses.append(
-                    types.Part.from_function_response(name=fc.name, response={"result": result_msg})
-                )
-            # Gửi kết quả các hàm về để Gemini hoàn thành lượt trả lời bằng text
-            response = session.send_message(function_responses)
+            # Vòng lặp tool-call NHIỀU LƯỢT: Gemini có thể search_web -> thấy link
+            # -> fetch_url đọc -> mới giải. Cứ tiếp tục tới khi hết function_calls.
+            for _round in range(5):
+                if not response.function_calls:
+                    break
+                function_responses = []
+                for fc in response.function_calls:
+                    result_msg, s_id, p_url, v_url = execute_tool(fc.name, dict(fc.args), allow_voice)
+                    sticker_id_to_send = sticker_id_to_send or s_id
+                    photo_url_to_send = photo_url_to_send or p_url
+                    voice_url_to_send = voice_url_to_send or v_url
+                    function_responses.append(
+                        types.Part.from_function_response(name=fc.name, response={"result": result_msg})
+                    )
+                log(f"🔁 Tool round {_round + 1}: gửi {len(function_responses)} kết quả về cho Gemini")
+                response = session.send_message(function_responses)
+            if response.function_calls:
+                log("⚠️  Gemini vẫn gọi tool sau 5 lượt, dừng để tránh lặp vô hạn")
 
         text = _extract_response_text(response)
         if not text:

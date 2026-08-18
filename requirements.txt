@@ -6,3 +6,5 @@ uvicorn
 edge-tts
 gTTS
 imageio-ffmpeg
+beautifulsoup4
+pypdf
