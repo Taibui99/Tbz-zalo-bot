@@ -205,7 +205,11 @@ def get_gemini_client():
     if _gemini_client is None:
         _gemini_client = genai.Client(
             api_key=GEMINI_API_KEY,
-            http_options=types.HttpOptions(timeout=20_000),
+            # 20s là quá ngắn khi Gemini giải đề dài/nghĩ lâu -> toàn lỗi 504
+            # DEADLINE_EXCEEDED / "The read operation timed out". Cho 180s để
+            # model kịp suy nghĩ xong; bot vẫn gửi "typing" liên tục nên Zalo
+            # không tưởng bot chết.
+            http_options=types.HttpOptions(timeout=180_000),
         )
     return _gemini_client
 
@@ -708,6 +712,15 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
             return (
                 "Bot đang bị giới hạn tốc độ của Gemini free tier. "
                 "Bro đợi khoảng 1 phút rồi nhắn lại nhé 🙏",
+                None,
+                None,
+                None,
+            )
+        if e.code == 504:
+            log(f"⚠️  Gemini quá thời gian (504): {e}")
+            return (
+                "Đề dài/nặng quá nên Gemini bị quá thời gian trả lời. "
+                "Bro chia nhỏ ra từng câu hỏi hoặc hỏi lại mình thử nhé 🙏",
                 None,
                 None,
                 None,
