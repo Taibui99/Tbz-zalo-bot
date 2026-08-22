@@ -239,6 +239,11 @@ def get_gemini_client():
 
 chat_sessions = {}
 
+# Các mã sticker bị Zalo từ chối (error 425 "The sticker is invalid") trong phiên
+# chạy - pack Zalo bị gỡ khỏi store thì mã chết hẳn. Nhớ lại để không chọn lại
+# mã chết nữa, đồng thời tự thay bằng mood khác còn sống.
+_dead_stickers: set = set()
+
 
 # Mô tả tool gửi sticker cho Gemini
 STICKER_TOOL_DESC = (
@@ -247,8 +252,7 @@ STICKER_TOOL_DESC = (
     "chúc mừng sinh nhật... hãy CHỦ ĐỘNG gửi sticker phù hợp kèm lời nhắn ngắn "
     "để câu trả lời sống động. KHI NGƯỜI DÙNG NHỜ GỬI STICKER (vd 'gửi sticker "
     "haha') thì BẮT BUỘC gọi hàm này thay vì trả lời text. "
-    "Các mood có sẵn: vui, haha, buon, yeu, ghet, tuc, chao, bye, woa, "
-    "camon, sinh_nhat, meme, chan, buon_ngu, nghi_ngo, dong_y. "
+    "Các mood có sẵn: vui, buon, chao, woa, nghi_ngo, dong_y. "
     "Chọn mood phù hợp nhất. "
     "Giới hạn tối đa 1 sticker mỗi lần trả lời, không gửi khi câu hỏi cần "
     "câu trả lời nội dung (hỏi thông tin, nhờ viết code...)."
@@ -629,12 +633,28 @@ def execute_tool(name: str, args: dict, allow_voice: bool) -> tuple:
     if name == "send_sticker":
         mood = args.get("mood")
         data = storage.load_data()
-        sticker_id_to_send = storage.sticker_code(data.get("sticker_library", {}).get(mood))
-        result_msg = (
-            "đã gửi sticker cho người dùng"
-            if sticker_id_to_send
-            else "không có sticker phù hợp, bỏ qua"
-        )
+        lib = data.get("sticker_library", {})
+        sticker_id_to_send = storage.sticker_code(lib.get(mood))
+        if not sticker_id_to_send or sticker_id_to_send in _dead_stickers:
+            # Mood hỏng/hết hiệu lực (Zalo 425) -> tự thay bằng mood khác còn sống
+            # để bot vẫn có phản ứng, thay vì chọn mã chắc chắn chết.
+            alive = [
+                (m, storage.sticker_code(v))
+                for m, v in lib.items()
+                if storage.sticker_code(v) and storage.sticker_code(v) not in _dead_stickers
+            ]
+            if alive:
+                alt_mood, alt_code = random.choice(alive)
+                sticker_id_to_send = alt_code
+                result_msg = (
+                    f"mood '{mood}' không còn khả dụng nên đã tự gửi sticker mood "
+                    f"'{alt_mood}' thay thế"
+                )
+            else:
+                sticker_id_to_send = None
+                result_msg = "không còn sticker nào hoạt động, bỏ qua và trả lời text thôi"
+        else:
+            result_msg = "đã gửi sticker cho người dùng"
     elif name == "generate_image":
         prompt = (args.get("prompt") or "").strip()
         photo_url_to_send = generate_and_store_image(prompt) if prompt else None
@@ -823,6 +843,7 @@ def _send_voice_sync(chat_id: str, voice_url: str) -> bool:
             ("json", {"chat_id": chat_id, "voice_url": voice_url}),
             ("form", {"chat_id": chat_id, "voice_url": voice_url}),
         ]
+        business_error = False
         for fmt, payload in payloads:
             try:
                 if fmt == "json":
@@ -836,8 +857,13 @@ def _send_voice_sync(chat_id: str, voice_url: str) -> bool:
                 error_code = body.get("error_code")
                 description = body.get("description")
                 last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
+                if error_code is not None:
+                    business_error = True
+                    break
             except requests.RequestException as e:
                 last_err = f"[{fmt}] {e}"
+        if business_error:
+            break
     log(f"⚠️  Lỗi gửi voice: {last_err}")
     return False
 
@@ -846,9 +872,12 @@ async def send_voice_message(chat_id: str, voice_url: str) -> bool:
     return await asyncio.to_thread(_send_voice_sync, chat_id, voice_url)
 
 
-def _send_sticker_sync(chat_id: str, sticker_id: str) -> bool:
+def _send_sticker_sync(chat_id: str, sticker_id: str) -> tuple:
     """Gửi sticker qua API trực tiếp (thư viện nuốt lỗi ok:false nên không dùng).
-    Thử lần lượt form-json (giống thư viện) -> json body -> form, log đầy đủ lỗi."""
+    Thử lần lượt form-json (giống thư viện) -> json body -> form.
+    Trả (ok, error_code). Khi Zalo đã trả LỖI NGHIỆP VỤ (có error_code, vd 425
+    'The sticker is invalid') thì DỪNG NGAY - thử tiếp format/base khác cũng vô
+    ích mà tốn ~4s mỗi lần gửi hỏng. Chỉ thử tiếp khi lỗi mạng/HTTP."""
     import json as _json
 
     last_err = None
@@ -859,6 +888,7 @@ def _send_sticker_sync(chat_id: str, sticker_id: str) -> bool:
             ("json", {"chat_id": chat_id, "sticker": sticker_id}),
             ("form", {"chat_id": chat_id, "sticker": sticker_id}),
         ]
+        business_error = None
         for fmt, payload in payloads:
             try:
                 if fmt == "json":
@@ -868,14 +898,25 @@ def _send_sticker_sync(chat_id: str, sticker_id: str) -> bool:
                 body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
                 if resp.status_code < 400 and body.get("ok", True):
                     log(f"🎟️  sendSticker OK ({fmt}) cho {chat_id}: {resp.text[:200]}")
-                    return True
+                    return True, None
                 error_code = body.get("error_code")
                 description = body.get("description")
                 last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
+                if error_code is not None:
+                    business_error = error_code
+                    break
             except requests.RequestException as e:
                 last_err = f"[{fmt}] {e}"
+        if business_error is not None:
+            # Zalo từ chối nội dung -> base khác cũng y như vậy, đừng mất công
+            code_str = str(sticker_id or "")
+            if str(business_error) == "425" and code_str:
+                _dead_stickers.add(code_str)
+                log(f"🪦 Đánh dấu sticker {code_str} là CHẾT (Zalo 425), sẽ không chọn lại nữa")
+            log(f"⚠️  Lỗi gửi sticker ({sticker_id}): {last_err}")
+            return False, business_error
     log(f"⚠️  Lỗi gửi sticker ({sticker_id}): {last_err}")
-    return False
+    return False, None
 
 
 def _send_text_sync(chat_id: str, text: str) -> bool:
@@ -890,6 +931,7 @@ def _send_text_sync(chat_id: str, text: str) -> bool:
             ("json", {"chat_id": chat_id, "message": text}),
             ("form", {"chat_id": chat_id, "message": text}),
         ]
+        business_error = False
         for fmt, payload in payloads:
             try:
                 if fmt == "json":
@@ -903,8 +945,14 @@ def _send_text_sync(chat_id: str, text: str) -> bool:
                 error_code = body.get("error_code")
                 description = body.get("description")
                 last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
+                if error_code is not None:
+                    # Zalo đã trả lời chính thức -> đừng thử thêm format/base nữa
+                    business_error = True
+                    break
             except requests.RequestException as e:
                 last_err = f"[{fmt}] {e}"
+        if business_error:
+            break
     log(f"⚠️  Lỗi gửi text: {last_err}")
     return False
 
@@ -924,6 +972,7 @@ def _send_photo_sync(chat_id: str, photo_url: str) -> bool:
             ("json", {"chat_id": chat_id, "photo": photo_url, "caption": ""}),
             ("form", {"chat_id": chat_id, "photo": photo_url, "caption": ""}),
         ]
+        business_error = False
         for fmt, payload in payloads:
             try:
                 if fmt == "json":
@@ -937,8 +986,13 @@ def _send_photo_sync(chat_id: str, photo_url: str) -> bool:
                 error_code = body.get("error_code")
                 description = body.get("description")
                 last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
+                if error_code is not None:
+                    business_error = True
+                    break
             except requests.RequestException as e:
                 last_err = f"[{fmt}] {e}"
+        if business_error:
+            break
     log(f"⚠️  Lỗi gửi ảnh: {last_err}")
     return False
 
@@ -1155,7 +1209,8 @@ async def send_media_replies(update: Update, chat_id: str, sticker_id, photo_url
         # Gửi qua API trực tiếp + kiểm tra response: thư viện python-zalo-bot nuốt
         # lỗi ok:false (chỉ raise khi HTTP != 200) nên sticker gửi hỏng vẫn báo thành
         # công. Gửi trực tiếp để log đầy đủ error_code/description.
-        if await asyncio.to_thread(_send_sticker_sync, chat_id, sticker_id):
+        ok, _err = await asyncio.to_thread(_send_sticker_sync, chat_id, sticker_id)
+        if ok:
             log(f"🎟️  Đã gửi sticker ({sticker_id}) cho {chat_id}")
         else:
             log(f"⚠️  Không gửi được sticker ({sticker_id}) cho {chat_id}")
@@ -1463,7 +1518,7 @@ async def api_test_send(request: Request):
                 content={"success": False, "error": "Không tìm thấy sticker (thiếu sticker_id hoặc mood sai)"},
                 status_code=400,
             )
-        ok = await asyncio.to_thread(_send_sticker_sync, chat_id, sticker_id)
+        ok, _err = await asyncio.to_thread(_send_sticker_sync, chat_id, sticker_id)
         result.update(ok=ok, kind="sticker", sticker_id=sticker_id)
     elif msg_type == "voice":
         text = str(body.get("text") or "").strip()

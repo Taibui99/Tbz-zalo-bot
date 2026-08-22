@@ -29,26 +29,19 @@ DEFAULT_DATA = {
     "schedule": {"Mon": [], "Tue": [], "Wed": [], "Thu": [], "Fri": [], "Sat": [], "Sun": []},
     # sticker_library: { "vui": "451a23c11f84f6daaf95", "buon": "...", ... } - mood key
     # bằng tiếng Việt không dấu, để Gemini chọn qua function calling.
-    # "vui" và "buon" là mã ĐÃ XÁC MINH (bro gửi sticker thật, bot nhận được),
-    # các mood còn lại lấy từ pack miễn phí https://stickers.zaloapp.com/sticker
-    # (nếu mood nào gửi lỗi, gửi sticker thật cho bot để lấy mã thay thế).
+    # Chỉ giữ mã CÒN GỬI ĐƯỢC (đã probe thật qua Zalo API ngày 22/08/2026).
+    # 10 mã pack cũ (haha/yeu/ghet/tuc/bye/camon/sinh_nhat/meme/chan/buon_ngu)
+    # bị Zalo từ chối 425 "The sticker is invalid" - các pack đó đã bị gỡ khỏi
+    # store của Zalo nên mã chết hẳn, không thể sửa bằng cách nào khác.
+    # Muốn thêm mood mới: gửi sticker thật cho bot -> nó log ra mã -> dán mã vào
+    # tab Stickers trên dashboard.
     "sticker_library": {
-        "vui": "3eb5aad796927fcc2683",   # [XÁC MINH] sticker cười của bro
-        "buon": "744605053940d01e8951",  # [XÁC MINH] sticker khóc của bro
-        "haha": "bcad5b6a672f8e71d73e",  # Cà Khịa
-        "yeu": "bf596d9a51dfb881e1ce",   # Yêu Quá Đi
-        "ghet": "c6c516062a43c31d9a52",  # Giận Rồi Nha
-        "tuc": "140c51c86d8d84d3dd9c",   # Thỏ Cáu Kỉnh
-        "chao": "e0279194add1448f1dc0",  # [XÁC MINH] sticker chào của bro
-        "bye": "8dc278014444ad1af455",   # Hi, Bye & Good Night
-        "woa": "5776d836e4730d2d5462",   # [XÁC MINH] sticker bất ngờ của bro
-        "nghi_ngo": "009cc1d1fd9414ca4d85",  # [XÁC MINH] sticker nghi ngờ của bro
-        "dong_y": "2d8f5ecc62898bd7d298",    # [XÁC MINH] sticker đồng ý của bro
-        "camon": "f6bbdb76e7330e6d5722", # Bên Nhau
-        "sinh_nhat": "905570964cd3a58dfcc2",  # Happy Birthday 2
-        "meme": "021e76da4a9fa3c1fa8e",  # Meme Boss Cat
-        "chan": "862c43ee7fab96f5cfba",  # Nhạt
-        "buon_ngu": "27d33d110154e80ab145",  # Mr. Lờ Đờ
+        "vui": "3eb5aad796927fcc2683",       # [CÒN SỐNG] sticker cười của bro
+        "buon": "744605053940d01e8951",      # [CÒN SỐNG] sticker khóc của bro
+        "chao": "e0279194add1448f1dc0",      # [CÒN SỐNG] sticker chào của bro
+        "woa": "5776d836e4730d2d5462",       # [CÒN SỐNG] sticker bất ngờ của bro
+        "nghi_ngo": "009cc1d1fd9414ca4d85",  # [CÒN SỐNG] sticker nghi ngờ của bro
+        "dong_y": "2d8f5ecc62898bd7d298",    # [CÒN SỐNG] sticker đồng ý của bro
     },
     # đánh dấu đã gửi thông báo nào hôm nay rồi, để không gửi lặp lại (reset mỗi ngày mới)
     "_last_sent_date": None,
