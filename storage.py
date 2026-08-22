@@ -46,6 +46,10 @@ DEFAULT_DATA = {
     # đánh dấu đã gửi thông báo nào hôm nay rồi, để không gửi lặp lại (reset mỗi ngày mới)
     "_last_sent_date": None,
     "_sent_today": [],  # danh sách các "key" thông báo đã gửi trong ngày hôm nay
+    # Sổ địa chỉ các chat từng tương tác với bot, phân loại ACCOUNT riêng vs NHÓM:
+    # {"chat_id": {type, name, message_count, first_seen, last_seen, member_names}}
+    # dashboard dùng sổ này để chọn đích gửi tin nhắn/voice/sticker test.
+    "chats": {},
 }
 
 

@@ -737,12 +737,13 @@ def build_chat_context(update: Update) -> str:
         return (
             f"[Bối cảnh hệ thống: Bạn đang ở trong MỘT NHÓM CHAT ZALO ({count}). "
             f"Người vừa nhắn là {sender}, tin nhắn hiển thị công khai cho cả nhóm. "
-            f"PHẢN CHIẾU tone của {sender}: họ nhắn lịch sự/đúng mực thì bạn trả lời "
-            f"lịch sự/đúng mực; họ đùa giỡn, chửi bậy thì bạn được phép trả lời sôi nổi "
-            f"tương ứng nhưng vẫn giữ chừng mực hơn 1-1 vì cả nhóm đang đọc. "
+            f"Ở nhóm CÙNG MỨT ĐỘ MẤT DẠY như khi chat riêng: phản chiếu đúng tone của "
+            f"{sender} và của cả nhóm - họ đùa giỡn, cà khịa, chửi bậy thì bạn được "
+            f"phép đáp trả sôi nổi tương đương hoặc nhỉnh hơn một chút, ĐỪNG làm ngọt, "
+            f"ĐỪNG giữ kẽ kiểu 'vì cả nhóm đang đọc', ĐỪNG giáo huấn. "
             f"BẮT BUỘC nhắc tên {sender} trong câu trả lời để cả nhóm biết bạn đang "
-            f"trả lời ai, không tâm sự chuyện riêng tư, KHÔNG gửi voice (voice không "
-            f"hỗ trợ trong nhóm).]"
+            f"trả lời ai, không tâm sự chuyện riêng tư sâu xa, KHÔNG gửi voice (voice "
+            f"không hỗ trợ trong nhóm), sticker thì thoải mái như mọi khi.]"
         )
     return (
         f"[Bối cảnh hệ thống: Bạn đang trò chuyện 1-1 với {sender}. "
@@ -1125,6 +1126,40 @@ def ensure_owner_captured(chat_id: str):
         log(f"👤 Đã tự động đặt {chat_id} làm chủ bot (owner) - dùng cho thông báo chào buổi sáng/thời khóa biểu")
 
 
+def touch_chat(update: Update):
+    """Ghi nhận mỗi chat (ACCOUNT riêng / NHÓM) vào sổ 'chats' trong bot_data.json:
+    loại hình, tên hiển thị, ai vừa nhắn, số tin nhắn, lần cuối hoạt động.
+    Dashboard đọc sổ này qua GET /api/chats để chọn đích gửi tin test/voice/sticker."""
+    try:
+        msg_chat = update.message.chat
+        chat_id = str(msg_chat.id)
+        ctype = str(getattr(msg_chat, "type", "PRIVATE") or "PRIVATE").upper()
+        sender = update.effective_user.display_name if update.effective_user else ""
+        title = getattr(msg_chat, "title", "") or ""  # tên nhóm (nếu có)
+        data = storage.load_data()
+        chats = data.setdefault("chats", {})
+        rec = chats.get(chat_id) or {}
+        chat_type = "GROUP" if ctype == "GROUP" else "PRIVATE"
+        # NHÓM: ưu tiên tên nhóm mới > tên nhóm cũ, KHÔNG bao giờ lấy tên người nhắn
+        # đè lên tên nhóm (nhiều update không kèm title). ACCOUNT: lấy tên người nhắn.
+        if chat_type == "GROUP":
+            rec["name"] = title or rec.get("name") or chat_id
+        else:
+            rec["name"] = sender or rec.get("name") or chat_id
+        rec["type"] = chat_type
+        rec["last_sender"] = sender or rec.get("last_sender")
+        rec["message_count"] = int(rec.get("message_count", 0)) + 1
+        rec["first_seen"] = rec.get("first_seen") or time.time()
+        rec["last_seen"] = time.time()
+        if chat_type == "GROUP" and sender:
+            names = set(rec.get("member_names") or []) | {sender}
+            rec["member_names"] = sorted(names)[:20]  # tối đa 20 tên cho gọn
+        chats[chat_id] = rec
+        storage.save_data(data)
+    except Exception as e:
+        log(f"⚠️  Không ghi được sổ chat: {e}")
+
+
 async def call_gemini_with_typing(bot, chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
     typing_task = asyncio.create_task(keep_typing(bot, chat_id))
     try:
@@ -1194,6 +1229,7 @@ async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Nhận sticker - log lại mã ID để bro thu thập, dùng gắn vào STICKER_LIBRARY."""
     chat_id = update.message.chat.id
+    touch_chat(update)
     sticker_id = update.message.sticker
     log(f"🎟️  Nhận sticker từ {chat_id} - mã ID: {sticker_id}")
     await update.message.reply_text(
@@ -1234,6 +1270,7 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sent_at = update.message.date
     received_at = vn_now()
     ensure_owner_captured(chat_id)
+    touch_chat(update)
     stats["message_count"] += 1
     stats["text_count"] += 1
     stats["last_message_at"] = time.time()
@@ -1258,6 +1295,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sent_at = update.message.date
     received_at = vn_now()
     ensure_owner_captured(chat_id)
+    touch_chat(update)
     stats["message_count"] += 1
     stats["photo_count"] += 1
     stats["last_message_at"] = time.time()
@@ -1476,10 +1514,37 @@ def api_config(request: Request):
     }
 
 
+@app.get("/api/chats")
+def api_chats(request: Request):
+    """Sổ địa chỉ các chat từng tương tác với bot, phân loại ACCOUNT riêng vs NHÓM,
+    mới hoạt động trước - dashboard dùng để chọn đích gửi tin test/voice/sticker."""
+    guard = _admin_guard(request)
+    if guard:
+        return guard
+    data = storage.load_data()
+    owner = data.get("owner_chat_id")
+    out = []
+    for cid, rec in (data.get("chats") or {}).items():
+        out.append({
+            "chat_id": cid,
+            "type": rec.get("type", "PRIVATE"),
+            "name": rec.get("name") or cid,
+            "last_sender": rec.get("last_sender"),
+            "message_count": rec.get("message_count", 0),
+            "is_owner": cid == owner,
+            "first_seen": rec.get("first_seen"),
+            "last_seen": rec.get("last_seen"),
+            "member_names": rec.get("member_names") or [],
+        })
+    out.sort(key=lambda x: (x.get("last_seen") or 0), reverse=True)
+    return {"chats": out}
+
+
 @app.post("/api/test/send")
 async def api_test_send(request: Request):
-    """Gửi 1 tin thử (text/sticker/voice/image) về owner_chat_id (hoặc chat_id được
-    chỉ định) từ dashboard - để chủ bot kiểm tra sticker/voice/ảnh hoạt động tốt."""
+    """Gửi 1 tin thử (text/sticker/voice/image) tới 1 chat bất kỳ trong sổ /api/chats
+    (mặc định owner_chat_id) từ dashboard - hỗ trợ cả NHÓM để chủ bot test voice/tin
+    nhắn thẳng vào nhóm."""
     guard = _admin_guard(request)
     if guard:
         return guard
