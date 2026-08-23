@@ -1311,6 +1311,9 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def on_startup():
+    # Render redeploy xoá sạch đĩa -> khôi phục cài đặt từ Gist backup (nếu có
+    # cấu hình GIST_TOKEN/GIST_ID) TRƯỚC khi bot & scheduler đọc dữ liệu.
+    storage.restore_from_gist()
     thread = threading.Thread(target=run_bot_in_background, daemon=True)
     thread.start()
 

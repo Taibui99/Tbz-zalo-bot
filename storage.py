@@ -2,9 +2,12 @@
 Lưu trữ cài đặt (thời khóa biểu, giờ chào buổi sáng, vị trí, chat_id chủ bot)
 vào 1 file JSON trên đĩa. Đơn giản, không cần database riêng.
 
-LƯU Ý: Render free tier sẽ MẤT file này mỗi khi redeploy code mới (đĩa không
-persistent qua các lần deploy) - giống hệt giới hạn của lịch sử chat trong RAM.
-Nếu cần lưu bền hơn, nên chuyển sang Supabase sau này.
+LƯU Ý QUAN TRỌNG: Render free tier XOÁ SẠCH đĩa mỗi khi redeploy - file này
+sẽ biến mất cùng mọi cài đặt. Để chống mất dữ liệu, set 2 biến môi trường:
+  - GIST_TOKEN: GitHub Personal Access Token (quyền gist)
+  - GIST_ID:   ID của 1 secret Gist chứa file bot_data.json
+Khi có đủ 2 biến này: khởi động sẽ tự TẢI bản backup về nếu file mất, và mỗi
+lần save_data() sẽ tự ĐẨY bản mới nhất lên Gist (chạy nền, không chặn bot).
 """
 
 import json
@@ -13,6 +16,15 @@ import threading
 
 DATA_FILE = os.path.join(os.path.dirname(__file__), "bot_data.json")
 _lock = threading.Lock()
+
+GIST_TOKEN = os.environ.get("GIST_TOKEN", "")
+GIST_ID = os.environ.get("GIST_ID", "")
+_GIST_FILENAME = "bot_data.json"
+_GIST_HEADERS = {
+    "Authorization": f"Bearer {GIST_TOKEN}",
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "tbz-zalo-bot",
+}
 
 DEFAULT_DATA = {
     "owner_chat_id": None,
@@ -106,3 +118,67 @@ def save_data(data: dict):
     with _lock:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+    _schedule_gist_backup(data)
+
+
+# ---------------------------------------------------------------------------
+# Backup lên GitHub Gist (chống mất dữ liệu khi Render redeploy xoá đĩa)
+# ---------------------------------------------------------------------------
+
+_backup_pending = False
+
+
+def restore_from_gist() -> bool:
+    """Nếu bot_data.json KHÔNG tồn tại (vừa redeploy xong) mà đã cấu hình
+    Gist thì tải bản backup mới nhất về. Trả True nếu khôi phục thành công."""
+    if not (GIST_TOKEN and GIST_ID) or os.path.exists(DATA_FILE):
+        return False
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"https://api.github.com/gists/{GIST_ID}", headers=_GIST_HEADERS
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            gist = json.loads(resp.read().decode("utf-8"))
+        raw = (gist.get("files") or {}).get(_GIST_FILENAME, {}).get("content")
+        if not raw:
+            return False
+        json.loads(raw)  # kiểm tra JSON hợp lệ trước khi ghi đè
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            f.write(raw)
+        print("[storage] 🔄 Đã khôi phục bot_data.json từ Gist backup")
+        return True
+    except Exception as e:
+        print(f"[storage] ⚠️  Không khôi phục được dữ liệu từ Gist: {e}")
+        return False
+
+
+def _gist_backup_worker(payload: str):
+    global _backup_pending
+    try:
+        import urllib.request
+
+        body = json.dumps({"files": {_GIST_FILENAME: {"content": payload}}}).encode("utf-8")
+        req = urllib.request.Request(
+            f"https://api.github.com/gists/{GIST_ID}",
+            data=body,
+            method="PATCH",
+            headers=_GIST_HEADERS,
+        )
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+        print("[storage] ☁️  Đã backup bot_data.json lên Gist")
+    except Exception as e:
+        print(f"[storage] ⚠️  Backup Gist thất bại: {e}")
+    finally:
+        _backup_pending = False
+
+
+def _schedule_gist_backup(data: dict):
+    global _backup_pending
+    if not (GIST_TOKEN and GIST_ID) or _backup_pending:
+        return
+    _backup_pending = True
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    threading.Thread(target=_gist_backup_worker, args=(payload,), daemon=True).start()
