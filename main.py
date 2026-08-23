@@ -874,15 +874,11 @@ def _post_zalo(endpoint: str, payload: dict, timeout: int = 30):
 
 
 def _send_voice_sync(chat_id: str, voice_url: str) -> tuple:
-    """Gửi voice (URL công khai) qua API sendVoice. Trả (ok, mô_tả_lỗi).
-    Tên field chưa được thư viện chuẩn hoá nên thử 'voice_url' trước, nếu
-    Zalo chối hẳn thì thử lại với 'voice' (kiểu Telegram-compatible)."""
-    ok, err, code = _post_zalo("sendVoice", {"chat_id": chat_id, "voice_url": voice_url})
-    if not ok and code is not None:
-        ok2, err2, code2 = _post_zalo("sendVoice", {"chat_id": chat_id, "voice": voice_url})
-        if ok2:
-            return True, None
-        err = f"{err} | thu lai field 'voice': {err2}"
+    """Gửi voice (URL công khai) qua API sendVoice - field đúng là 'voice_url'
+    (đã kiểm chứng: 'voice' bị chối 'The voice url must not be empty').
+    Trả (ok, mô_tả_lỗi).
+    Lưu ý: Zalo CHẶN gửi voice vào NHÓM (422 not permitted), chỉ chat riêng OK."""
+    ok, err, _code = _post_zalo("sendVoice", {"chat_id": chat_id, "voice_url": voice_url})
     if not ok:
         log(f"⚠️  Lỗi gửi voice: {err}")
     return ok, err
