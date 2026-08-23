@@ -252,6 +252,9 @@ STICKER_TOOL_DESC = (
     "chúc mừng sinh nhật... hãy CHỦ ĐỘNG gửi sticker phù hợp kèm lời nhắn ngắn "
     "để câu trả lời sống động. KHI NGƯỜI DÙNG NHỜ GỬI STICKER (vd 'gửi sticker "
     "haha') thì BẮT BUỘC gọi hàm này thay vì trả lời text. "
+    "TỐC ĐỘ: hãy VIẾT SẴN lời nhắn/text trả lời NGAY TRONG CÙNG LƯỢT gọi hàm "
+    "này (text đi cùng functionCall), đừng dừng lại chờ kết quả hàm rồi mới "
+    "viết - như vậy người dùng phải đợi lâu hơn đáng kể. "
     "Các mood có sẵn: vui, buon, chao, woa, nghi_ngo, dong_y. "
     "Chọn mood phù hợp nhất. "
     "Giới hạn tối đa 1 sticker mỗi lần trả lời, không gửi khi câu hỏi cần "
@@ -270,7 +273,8 @@ VOICE_TOOL_DESC = (
     "ngữ cảnh. KHI NGƯỜI DÙNG NHỜ GỬI VOICE / NHẮN THOẠI / ĐỌC TO LÊN thì "
     "BẮT BUỘC gọi hàm này thay vì trả lời bằng text. Nội dung text nên ngắn "
     "gọn, tự nhiên như lời nói. Chỉ hoạt động trong chat 1-1, không gọi cho "
-    "nhóm."
+    "nhóm. Khi gọi hàm này vẫn viết sẵn vài chữ dẫn dắt trong cùng lượt để "
+    "người dùng không phải đợi thêm lượt xử lý."
 )
 SEARCH_TOOL_DESC = (
     "Tìm kiếm trên internet theo 1 truy vấn để lấy thông tin/đề/tài liệu mới "
@@ -961,11 +965,19 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
         if response.function_calls:
             # Vòng lặp tool-call NHIỀU LƯỢT: Gemini có thể search_web -> thấy link
             # -> fetch_url đọc -> mới giải. Cứ tiếp tục tới khi hết function_calls.
+            # TỐI ƯU TỐC ĐỘ: nếu lượt gọi chỉ chứa tool MEDIA (sticker/voice/ảnh)
+            # và Gemini đã viết sẵn text trong cùng lượt thì dùng luôn câu đó -
+            # không gửi kết quả tool về cho nó thêm lượt nữa, tiết kiệm nguyên
+            # 1 vòng gọi Gemini (~3-8s) mỗi lần bot thả sticker.
+            media_tools = {"send_sticker", "send_voice", "generate_image"}
             for _round in range(5):
                 if not response.function_calls:
                     break
                 function_responses = []
-                for fc in response.function_calls:
+                fcs = list(response.function_calls)
+                only_media = all(fc.name in media_tools for fc in fcs)
+                inline_text = _extract_response_text(response) if only_media else ""
+                for fc in fcs:
                     result_msg, s_id, p_url, v_url = execute_tool(fc.name, dict(fc.args), allow_voice)
                     sticker_id_to_send = sticker_id_to_send or s_id
                     photo_url_to_send = photo_url_to_send or p_url
@@ -973,9 +985,12 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
                     function_responses.append(
                         types.Part.from_function_response(name=fc.name, response={"result": result_msg})
                     )
+                if inline_text:
+                    log(f"⚡ Tool round {_round + 1}: có text đi kèm tool media -> dùng luôn, bỏ 1 vòng gọi Gemini")
+                    break
                 log(f"🔁 Tool round {_round + 1}: gửi {len(function_responses)} kết quả về cho Gemini")
                 response = session.send_message(function_responses)
-            if response.function_calls:
+            if response.function_calls and not _extract_response_text(response):
                 log("⚠️  Gemini vẫn gọi tool sau 5 lượt, dừng để tránh lặp vô hạn")
 
         text = _extract_response_text(response)
@@ -1506,8 +1521,21 @@ async def api_test_send(request: Request):
         sticker_id = str(body.get("sticker_id") or "").strip()
         if not sticker_id:
             mood = str(body.get("mood") or "").strip()
-            entry = storage.load_data().get("sticker_library", {}).get(mood)
-            sticker_id = storage.sticker_code(entry)
+            lib = storage.load_data().get("sticker_library", {})
+            if mood:
+                entry = lib.get(mood)
+                sticker_id = storage.sticker_code(entry)
+                if sticker_id in _dead_stickers:
+                    sticker_id = None
+            else:
+                # Không chỉ định -> chọn ngẫu nhiên 1 mood còn sống (tiện nút
+                # test trên dashboard, kể cả gửi vào nhóm)
+                alive = [
+                    c
+                    for c in (storage.sticker_code(v) for v in lib.values())
+                    if c and c not in _dead_stickers
+                ]
+                sticker_id = random.choice(alive) if alive else None
         if not sticker_id:
             return JSONResponse(
                 content={"success": False, "error": "Không tìm thấy sticker (thiếu sticker_id hoặc mood sai)"},
