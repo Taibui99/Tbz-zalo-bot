@@ -826,176 +826,100 @@ def make_voice_url(text: str):
     return f"{PUBLIC_URL}/voice/{voice_id}.aac"
 
 
-def _send_voice_sync(chat_id: str, voice_url: str) -> bool:
-    """Gọi thẳng API sendVoice của Zalo Bot (thư viện python-zalo-bot chưa có hàm này).
-    Gửi theo nhiều format lần lượt cho chắc:
-    1. form-urlencoded giống HẸN đúng thư viện (json.dumps từng giá trị) - đã chứng minh
-       hoạt động với sendMessage
-    2. application/json body (docs chính thức)
-    3. form-urlencoded thường
-    Zalo trả HTTP 200 kèm ok:false khi lỗi nghiệp vụ nên phải parse body JSON."""
+def _post_zalo(endpoint: str, payload: dict, timeout: int = 30):
+    """Gửi 1 request tới Zalo Bot API, thử lần lượt nhiều format + nhiều base.
+    Trả về (ok, last_err, error_code).
+
+    Thứ tự format - theo ĐÚNG cách thư viện zalo_bot gửi request:
+    RequestParameter.json_value giữ chuỗi NGUYÊN BẢN (chỉ object/list mới được
+    json.dumps). Đã kiểm chứng thực tế: bọc json.dumps vào chat_id làm Zalo
+    nhận chuỗi có dấu ngoặc kép literal và báo 410 'The chat_id is invaild'.
+    Khi server đã trả lỗi nghiệp vụ (có error_code) thì dừng, không thử base
+    còn lại; chỉ thử tiếp format khác trong cùng base."""
     import json as _json
 
+    quoted = {k: _json.dumps(v) for k, v in payload.items()}
     last_err = None
+    business_code = None
     for base in ZALO_API_BASES:
-        url = f"{base}/bot{BOT_TOKEN}/sendVoice"
-        payloads = [
-            ("form-json", {"chat_id": _json.dumps(chat_id), "voice_url": _json.dumps(voice_url)}),
-            ("json", {"chat_id": chat_id, "voice_url": voice_url}),
-            ("form", {"chat_id": chat_id, "voice_url": voice_url}),
-        ]
-        business_error = False
-        for fmt, payload in payloads:
+        url = f"{base}/bot{BOT_TOKEN}/{endpoint}"
+        for fmt, data in (
+            ("form", payload),
+            ("json", payload),
+            ("form-json", quoted),
+        ):
             try:
                 if fmt == "json":
-                    resp = requests.post(url, json=payload, timeout=30)
+                    resp = requests.post(url, json=data, timeout=timeout)
                 else:
-                    resp = requests.post(url, data=payload, timeout=30)
-                body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+                    resp = requests.post(url, data=data, timeout=timeout)
+                body = (
+                    resp.json()
+                    if resp.headers.get("Content-Type", "").startswith("application/json")
+                    else {}
+                )
                 if resp.status_code < 400 and body.get("ok", True):
-                    log(f"🎙️  sendVoice OK ({fmt}) cho {chat_id}: {resp.text[:200]}")
-                    return True
+                    log(f"✅ {endpoint} OK ({fmt}) cho {payload.get('chat_id')}: {resp.text[:160]}")
+                    return True, None, None
                 error_code = body.get("error_code")
                 description = body.get("description")
                 last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
                 if error_code is not None:
-                    business_error = True
-                    break
+                    # Server đã trả lời chính thức -> payload có vấn đề thật,
+                    # thử format/base khác cũng vậy. Dừng luôn cho nhanh.
+                    return False, last_err, error_code
             except requests.RequestException as e:
                 last_err = f"[{fmt}] {e}"
-        if business_error:
-            break
-    log(f"⚠️  Lỗi gửi voice: {last_err}")
-    return False
+    return False, last_err, None
+
+
+def _send_voice_sync(chat_id: str, voice_url: str) -> tuple:
+    """Gửi voice (URL công khai) qua API sendVoice. Trả (ok, mô_tả_lỗi)."""
+    ok, err, _code = _post_zalo("sendVoice", {"chat_id": chat_id, "voice_url": voice_url})
+    if not ok:
+        log(f"⚠️  Lỗi gửi voice: {err}")
+    return ok, err
 
 
 async def send_voice_message(chat_id: str, voice_url: str) -> bool:
-    return await asyncio.to_thread(_send_voice_sync, chat_id, voice_url)
+    ok, _err = await asyncio.to_thread(_send_voice_sync, chat_id, voice_url)
+    return ok
 
 
 def _send_sticker_sync(chat_id: str, sticker_id: str) -> tuple:
     """Gửi sticker qua API trực tiếp (thư viện nuốt lỗi ok:false nên không dùng).
-    Thử lần lượt form-json (giống thư viện) -> json body -> form.
-    Trả (ok, error_code). Khi Zalo đã trả LỖI NGHIỆP VỤ (có error_code, vd 425
-    'The sticker is invalid') thì DỪNG NGAY - thử tiếp format/base khác cũng vô
-    ích mà tốn ~4s mỗi lần gửi hỏng. Chỉ thử tiếp khi lỗi mạng/HTTP."""
-    import json as _json
-
-    last_err = None
-    for base in ZALO_API_BASES:
-        url = f"{base}/bot{BOT_TOKEN}/sendSticker"
-        payloads = [
-            ("form-json", {"chat_id": _json.dumps(chat_id), "sticker": _json.dumps(sticker_id)}),
-            ("json", {"chat_id": chat_id, "sticker": sticker_id}),
-            ("form", {"chat_id": chat_id, "sticker": sticker_id}),
-        ]
-        business_error = None
-        for fmt, payload in payloads:
-            try:
-                if fmt == "json":
-                    resp = requests.post(url, json=payload, timeout=30)
-                else:
-                    resp = requests.post(url, data=payload, timeout=30)
-                body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-                if resp.status_code < 400 and body.get("ok", True):
-                    log(f"🎟️  sendSticker OK ({fmt}) cho {chat_id}: {resp.text[:200]}")
-                    return True, None
-                error_code = body.get("error_code")
-                description = body.get("description")
-                last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
-                if error_code is not None:
-                    business_error = error_code
-                    break
-            except requests.RequestException as e:
-                last_err = f"[{fmt}] {e}"
-        if business_error is not None:
-            # Zalo từ chối nội dung -> base khác cũng y như vậy, đừng mất công
-            code_str = str(sticker_id or "")
-            if str(business_error) == "425" and code_str:
-                _dead_stickers.add(code_str)
-                log(f"🪦 Đánh dấu sticker {code_str} là CHẾT (Zalo 425), sẽ không chọn lại nữa")
-            log(f"⚠️  Lỗi gửi sticker ({sticker_id}): {last_err}")
-            return False, business_error
-    log(f"⚠️  Lỗi gửi sticker ({sticker_id}): {last_err}")
-    return False, None
+    Trả (ok, error_code_dạng_chuỗi).
+    Riêng lỗi 425 (pack sticker bị gỡ khỏi store) là chắc chắn - đánh dấu mã
+    chết ngay để bot không chọn lại."""
+    ok, err, code = _post_zalo("sendSticker", {"chat_id": chat_id, "sticker": sticker_id})
+    code_str = str(code) if code is not None else None
+    if not ok:
+        if code_str == "425" and sticker_id:
+            _dead_stickers.add(str(sticker_id))
+            log(f"🪦 Đánh dấu sticker {sticker_id} là CHẾT (Zalo 425), sẽ không chọn lại nữa")
+        else:
+            log(f"⚠️  Lỗi gửi sticker ({sticker_id}): {err}")
+    return ok, code_str
 
 
-def _send_text_sync(chat_id: str, text: str) -> bool:
-    """Gửi text qua API trực tiếp cho endpoint /api/test/send (dashboard)."""
-    import json as _json
-
-    last_err = None
-    for base in ZALO_API_BASES:
-        url = f"{base}/bot{BOT_TOKEN}/sendMessage"
-        payloads = [
-            ("form-json", {"chat_id": _json.dumps(chat_id), "message": _json.dumps(text)}),
-            ("json", {"chat_id": chat_id, "message": text}),
-            ("form", {"chat_id": chat_id, "message": text}),
-        ]
-        business_error = False
-        for fmt, payload in payloads:
-            try:
-                if fmt == "json":
-                    resp = requests.post(url, json=payload, timeout=30)
-                else:
-                    resp = requests.post(url, data=payload, timeout=30)
-                body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-                if resp.status_code < 400 and body.get("ok", True):
-                    log(f"💬  sendMessage OK ({fmt}) cho {chat_id}: {resp.text[:200]}")
-                    return True
-                error_code = body.get("error_code")
-                description = body.get("description")
-                last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
-                if error_code is not None:
-                    # Zalo đã trả lời chính thức -> đừng thử thêm format/base nữa
-                    business_error = True
-                    break
-            except requests.RequestException as e:
-                last_err = f"[{fmt}] {e}"
-        if business_error:
-            break
-    log(f"⚠️  Lỗi gửi text: {last_err}")
-    return False
+def _send_text_sync(chat_id: str, text: str) -> tuple:
+    """Gửi text qua API sendMessage. Trả (ok, mô_tả_lỗi)."""
+    ok, err, _code = _post_zalo("sendMessage", {"chat_id": chat_id, "message": text})
+    if not ok:
+        log(f"⚠️  Lỗi gửi text: {err}")
+    return ok, err
 
 
-def _send_photo_sync(chat_id: str, photo_url: str) -> bool:
-    """Gửi ảnh (URL công khai) qua API trực tiếp cho /api/test/send (dashboard)."""
-    import json as _json
-
-    last_err = None
-    for base in ZALO_API_BASES:
-        url = f"{base}/bot{BOT_TOKEN}/sendPhoto"
-        payloads = [
-            (
-                "form-json",
-                {"chat_id": _json.dumps(chat_id), "photo": _json.dumps(photo_url), "caption": _json.dumps("")},
-            ),
-            ("json", {"chat_id": chat_id, "photo": photo_url, "caption": ""}),
-            ("form", {"chat_id": chat_id, "photo": photo_url, "caption": ""}),
-        ]
-        business_error = False
-        for fmt, payload in payloads:
-            try:
-                if fmt == "json":
-                    resp = requests.post(url, json=payload, timeout=60)
-                else:
-                    resp = requests.post(url, data=payload, timeout=60)
-                body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
-                if resp.status_code < 400 and body.get("ok", True):
-                    log(f"🖼️  sendPhoto OK ({fmt}) cho {chat_id}: {resp.text[:200]}")
-                    return True
-                error_code = body.get("error_code")
-                description = body.get("description")
-                last_err = f"[{fmt}] error_code={error_code}, description={description or resp.text[:200]}"
-                if error_code is not None:
-                    business_error = True
-                    break
-            except requests.RequestException as e:
-                last_err = f"[{fmt}] {e}"
-        if business_error:
-            break
-    log(f"⚠️  Lỗi gửi ảnh: {last_err}")
-    return False
+def _send_photo_sync(chat_id: str, photo_url: str) -> tuple:
+    """Gửi ảnh (URL công khai) qua API sendPhoto. Trả (ok, mô_tả_lỗi)."""
+    ok, err, _code = _post_zalo(
+        "sendPhoto",
+        {"chat_id": chat_id, "photo": photo_url, "caption": ""},
+        timeout=60,
+    )
+    if not ok:
+        log(f"⚠️  Lỗi gửi ảnh: {err}")
+    return ok, err
 
 
 def _extract_response_text(response) -> str:
@@ -1566,11 +1490,12 @@ async def api_test_send(request: Request):
 
     msg_type = body.get("type", "text")
     result = {"chat_id": chat_id}
+    err_desc = None
     if msg_type == "text":
         text = str(body.get("text") or "").strip()
         if not text:
             return JSONResponse(content={"success": False, "error": "Thiếu text"}, status_code=400)
-        ok = await asyncio.to_thread(_send_text_sync, chat_id, text)
+        ok, err_desc = await asyncio.to_thread(_send_text_sync, chat_id, text)
         result.update(ok=ok, kind="text")
     elif msg_type == "sticker":
         sticker_id = str(body.get("sticker_id") or "").strip()
@@ -1583,7 +1508,8 @@ async def api_test_send(request: Request):
                 content={"success": False, "error": "Không tìm thấy sticker (thiếu sticker_id hoặc mood sai)"},
                 status_code=400,
             )
-        ok, _err = await asyncio.to_thread(_send_sticker_sync, chat_id, sticker_id)
+        ok, code_str = await asyncio.to_thread(_send_sticker_sync, chat_id, sticker_id)
+        err_desc = f"Zalo error_code={code_str}" if code_str else None
         result.update(ok=ok, kind="sticker", sticker_id=sticker_id)
     elif msg_type == "voice":
         text = str(body.get("text") or "").strip()
@@ -1595,7 +1521,7 @@ async def api_test_send(request: Request):
                 content={"success": False, "error": "Không tạo được voice (thiếu PUBLIC_URL / lỗi TTS)"},
                 status_code=400,
             )
-        ok = await asyncio.to_thread(_send_voice_sync, chat_id, voice_url)
+        ok, err_desc = await asyncio.to_thread(_send_voice_sync, chat_id, voice_url)
         result.update(ok=ok, kind="voice", voice_url=voice_url)
     elif msg_type == "image":
         prompt = str(body.get("text") or "").strip()
@@ -1607,7 +1533,7 @@ async def api_test_send(request: Request):
                 content={"success": False, "error": "Không tạo được ảnh (thiếu PUBLIC_URL?)"},
                 status_code=400,
             )
-        ok = await asyncio.to_thread(_send_photo_sync, chat_id, photo_url)
+        ok, err_desc = await asyncio.to_thread(_send_photo_sync, chat_id, photo_url)
         result.update(ok=ok, kind="image", photo_url=photo_url)
     else:
         return JSONResponse(
@@ -1616,6 +1542,8 @@ async def api_test_send(request: Request):
         )
 
     log(f"🧪 Test gửi ({result['kind']}) cho {chat_id} từ dashboard: {'OK' if ok else 'THẤT BẠI'}")
+    if err_desc:
+        result["error"] = err_desc
     return {"success": True, **result}
 
 
