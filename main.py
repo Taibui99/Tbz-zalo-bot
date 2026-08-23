@@ -176,6 +176,9 @@ conv_lock = threading.Lock()
 
 stats = {
     "started_at": time.time(),
+    # ID của lần chạy này - mỗi lần container Render khởi động lại là đổi,
+    # dùng để chẩn đoán mất dữ liệu trên Logs dashboard
+    "boot_id": uuid.uuid4().hex[:8],
     "message_count": 0,
     "text_count": 0,
     "photo_count": 0,
@@ -1311,8 +1314,16 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def on_startup():
-    # Render redeploy xoá sạch đĩa -> khôi phục cài đặt từ Gist backup (nếu có
-    # cấu hình GIST_TOKEN/GIST_ID) TRƯỚC khi bot & scheduler đọc dữ liệu.
+    # CHẨN ĐOÁN MẤT DỮ LIỆU: Render free dùng đĩa tạm thời - container mới
+    # (do deploy HOẶC bị ngủ rồi đánh thức) KHÔNG còn file dữ liệu. Log rõ
+    # để khi cài đặt "tự reset", xem Logs là biết chính xác lúc nào, vì sao.
+    _had_file = os.path.exists(storage.DATA_FILE)
+    log(
+        f"🧊 Container mới khởi động | boot_id={stats['boot_id']} | "
+        f"file bot_data.json có sẵn: {'CÓ' if _had_file else 'KHÔNG -> cài đặt về mặc định'}"
+    )
+    # Khôi phục cài đặt từ Gist backup (nếu đã cấu hình GIST_TOKEN/GIST_ID)
+    # TRƯỚC khi bot & scheduler đọc dữ liệu.
     storage.restore_from_gist()
     thread = threading.Thread(target=run_bot_in_background, daemon=True)
     thread.start()
@@ -1401,7 +1412,12 @@ async def api_put_settings(request: Request, body: dict):
         chat_sessions.clear()
         log("🎟️  Đã cập nhật thư viện sticker, các phiên chat sẽ dùng bộ mới từ tin nhắn tiếp theo")
     storage.save_data(data)
-    log("⚙️  Đã cập nhật cài đặt (chào buổi sáng / thời khóa biểu / vị trí)")
+    _periods = sum(len(v or []) for v in (data.get("schedule") or {}).values())
+    _mg = data.get("morning_greeting") or {}
+    log(
+        f"⚙️  Đã lưu cài đặt | boot_id={stats['boot_id']} | thời khóa biểu {_periods} tiết | "
+        f"chào sáng={'BẬT ' + str(_mg.get('time')) if _mg.get('enabled') else 'TẮT'}"
+    )
     return {"success": True}
 
 
