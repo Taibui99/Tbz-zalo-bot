@@ -345,8 +345,24 @@ def _parse_ddg_html(html: str) -> list:
     return results
 
 
+def _decode_bing_url(href: str) -> str:
+    """Link Bing dạng /ck/a?...u=a1<base64url> -> giải mã ra URL gốc."""
+    if "bing.com/ck/" not in href:
+        return href
+    m = re.search(r"[?&]u=a1([A-Za-z0-9_\-+%]+)", href)
+    if not m:
+        return href
+    import base64
+    enc = m.group(1).replace("-", "+").replace("_", "/")
+    enc += "=" * (-len(enc) % 4)
+    try:
+        return base64.b64decode(enc).decode("utf-8", "replace")
+    except Exception:
+        return href
+
+
 def _parse_bing_html(html: str) -> list:
-    """Parse kết quả Bing (li.b_algo)."""
+    """Parse kết quả Bing (li.b_algo), giải mã link redirect."""
     soup = BeautifulSoup(html, "html.parser")
     results = []
     for li in soup.select("li.b_algo")[:6]:
@@ -355,7 +371,7 @@ def _parse_bing_html(html: str) -> list:
         if not link:
             continue
         title = _collapse_whitespace(link.get_text(" ", strip=True))
-        url = link.get("href", "")
+        url = _decode_bing_url(link.get("href", ""))
         snippet = ""
         cap = li.select_one(".b_caption p") or li.find("p")
         if cap:
@@ -365,15 +381,33 @@ def _parse_bing_html(html: str) -> list:
     return results
 
 
+_SEARCH_TOKEN_SPLIT = re.compile(r"[\W_]+", re.UNICODE)
+
+
+def _results_relevant(results: list, query: str) -> bool:
+    """Chặn kết quả rác kiểu Bing hiểu-sai-query (VD tra đề HSG mà trả về
+    'DVDMS thuốc Ấn Độ'). Cần ít nhất 2 từ khoá của truy vấn xuất hiện."""
+    if not results:
+        return False
+    toks = [t for t in _SEARCH_TOKEN_SPLIT.split(query.lower()) if len(t) >= 3]
+    if len(toks) <= 2:
+        return True  # query ngắn quá thì không đủ dữ kiện để xét
+    hay = " ".join(results).lower()
+    hits = sum(1 for t in set(toks) if t in hay)
+    return hits >= 2
+
+
 # DuckDuckGo/Bing hay chặn IP datacenter (Render) bằng captcha -> thử lần lượt
-# nhiều đường: GET rồi POST với DDG, sang Bing, về lite, cuối cùng IA API.
+# nhiều đường. LƯU Ý: các đường scrape này chỉ là dự phòng tạm - DDG đã chặn
+# IP datacenter (HTTP 202), Bing hay hiểu sai query tiếng Việt (đã có filter
+# chặn kết quả rác). Muốn tra cứu ổn định dài hạn thì cấu hình TAVILY_API_KEY.
 _SEARCH_ATTEMPTS = (
     ("ddg-get", lambda h, q: requests.get(
         "https://html.duckduckgo.com/html/", params={"q": q}, headers=h, timeout=_SEARCH_TIMEOUT)),
     ("ddg-post", lambda h, q: requests.post(
         "https://html.duckduckgo.com/html/", data={"q": q}, headers=h, timeout=_SEARCH_TIMEOUT)),
     ("bing", lambda h, q: requests.get(
-        "https://www.bing.com/search", params={"q": q, "setlang": "vi"}, headers=h, timeout=_SEARCH_TIMEOUT)),
+        "https://www.bing.com/search", params={"q": q, "mkt": "vi-VN", "setlang": "vi"}, headers=h, timeout=_SEARCH_TIMEOUT)),
     ("ddg-lite", lambda h, q: requests.get(
         "https://lite.duckduckgo.com/lite/", params={"q": q}, headers=h, timeout=_SEARCH_TIMEOUT)),
 )
@@ -405,6 +439,9 @@ def search_web(query: str) -> str:
         try:
             resp = fetch(headers, query)
             results = _parse_bing_html(resp.text) if name == "bing" else _parse_ddg_html(resp.text)
+            if results and not _results_relevant(results, query):
+                log(f"🌐 Search {name}: {len(results)} kết quả nhưng KHÔNG liên quan -> bỏ")
+                continue
             if results:
                 log(f"🌐 Search OK qua {name}: {len(results)} kết quả cho {query!r}")
                 return "\n".join(results)
