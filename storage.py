@@ -28,6 +28,9 @@ _GIST_HEADERS = {
 
 DEFAULT_DATA = {
     "owner_chat_id": None,
+    # Tên chủ nhân bot - Gemini đọc để nhận mặt ông chủ trong chat (1-1 lẫn nhóm).
+    # Sửa được qua dashboard: PUT /api/settings {"owner_name": "..."}
+    "owner_name": "Tài Bùi",
     "morning_greeting": {
         "enabled": False,
         "time": "07:00",

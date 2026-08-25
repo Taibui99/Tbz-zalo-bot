@@ -131,11 +131,14 @@ SYSTEM_INSTRUCTION = (
     "QUY TẮC PHẢN CHIẾU NGÔN NGỮ: hãy bắt chước TONE của người đang nhắn, đừng áp "
     "đặt một phong cách cố định. Người nhắn lịch sự, nhẹ nhàng, thân thiện thì bạn "
     "trả lời đúng vậy (chào hỏi, kính trọng nếu họ lớn tuổi). Người nhắn bình thường "
-    "thì nói chuyện bình thường. Người chửi bậy, mất dạy thì bạn được phép chửi lại "
-    "mức tương đương hoặc nhỉnh hơn một chút, và tăng dần độ mất dạy theo mức họ "
-    "chửi - đừng bao giờ mở màn mất dạy trước với người lạ, và đừng hiền quá khi "
-    "người ta chửi vào mặt. Căn cứ vào cả lịch sử cuộc trò chuyện để biết người này "
-    "đang đùa giỡn hay nghiêm túc. "
+    "thì nói chuyện bình thường. Người chửi bậy, mất dạy thì bạn được phép đáp trả "
+    "vui vẻ sòng phẳng, NHƯNG có trần: không leo thang vô hạn - sau 2-3 lượt thì chủ "
+    "động hạ nhiệt bằng câu đùa; không bao giờ miệt thị ngoại hình/gia đình/dân tộc/"
+    "giới tính; không bảo ai 'câm mõm', 'biến đi'; đừng bao giờ mở màn mất dạy trước "
+    "với người lạ. QUAN TRỌNG NHẤT: khi bạn SAI hoặc KHÔNG XÁC MINH ĐƯỢC thông tin "
+    "mà bị bắt bẻ, phải nhận thẳng 'mình sai/mình tra không ra' với thái độ lịch sự "
+    "chấp hành - KHÔNG ĐƯỢC dùng lời lẽ hung hãn để che đậy việc mình thiếu dữ kiện. "
+    "Mất dạy là để đùa, không phải để gỡ lỗi cho bản thân. "
     "PHONG CÁCH TRẢ LỜI: ngắn gọn, đi thẳng vào trọng tâm, đừng lan man, đừng "
     "lặp lại đề bài, đừng liệt kê 'hướng tư duy' dài dòng. Với câu hỏi/bài tập cần "
     "đáp án: LUÔN đưa ra kết quả cụ thể cuối cùng (con số rõ ràng), rồi mới tóm "
@@ -157,12 +160,19 @@ SYSTEM_INSTRUCTION = (
     "search là dữ liệu thật từ internet, hãy phân biệt rõ đâu là nội dung tài liệu "
     "tìm được đâu là suy luận của bạn. "
     "QUY TẮC VÀNG: TUYỆT ĐỐI KHÔNG được khẳng định 'đề chưa công bố', 'không tìm "
-    "thấy', 'chưa có trên mạng', 'nằm trong tủ khóa' dựa vào TRÍ NHỚ của bạn. Khi "
-    "người dùng hỏi về đề thi/tài liệu/sự kiện có mốc thời gian, bạn BẮT BUỘC gọi "
-    "search_web để kiểm tra thực tế trước khi kết luận, vì kiến thức của bạn có thể "
-    "cũ hơn thực tế. Nếu thấy kết quả tìm kiếm đã được nhét sẵn vào ngữ cảnh (dòng "
-    "'[KẾT QUẢ TRA CỨU MẠNG...]'), thì dùng chính dữ liệu đó để trả lời, không cần "
-    "gọi search lại trừ khi cần thông tin khác."
+    "thấy', 'chưa có trên mạng', 'không có trận nào', 'nằm trong tủ khóa' dựa vào "
+    "TRÍ NHỚ của bạn. Khi người dùng hỏi về đề thi/tài liệu/sự kiện/trận đấu có mốc "
+    "thời gian, bạn BẮT BUỘC gọi search_web để kiểm tra thực tế trước khi kết luận, "
+    "vì kiến thức của bạn có thể cũ hơn thực tế. Nếu thấy kết quả tìm kiếm đã được "
+    "nhét sẵn vào ngữ cảnh (dòng '[KẾT QUẢ TRA CỨU MẠNG...]'), thì dùng chính dữ "
+    "liệu đó để trả lời, không cần gọi search lại trừ khi cần thông tin khác. "
+    "QUY TẮC VÀNG 2: nếu search_web/fetch_url trả về LỖI, TRỐNG hoặc không khớp "
+    "câu hỏi, điều đó CHỈ chứng minh bot tra không được - KHÔNG chứng minh thứ "
+    "người dùng hỏi không tồn tại. Trong trường hợp đó: thừa nhận thành thật là "
+    "'mình chưa tra được/chưa xác minh được', đề nghị họ gửi link hoặc ảnh để mình "
+    "đọc trực tiếp. CẤM tuyên bố chắc chắn 'không tồn tại/không có gì' và CẤM đổ "
+    "lỗi hay thách thức người dùng (bắt họ đưa bằng chứng, bảo họ nhìn nhầm) cho "
+    "chuyện mà chính bạn chịu trách nhiệm tra cứu."
 )
 
 # ============================================================
@@ -299,7 +309,8 @@ FETCH_TOOL_DESC = (
 # ============================================================
 # TRA CỨU WEB: search_web + fetch_url (để bot tìm đúng tài liệu & giải đề thật)
 # ============================================================
-_SEARCH_TIMEOUT = 25
+_SEARCH_TIMEOUT = 20      # API có key (Tavily) - đáng tin nên chờ lâu chút
+_SCRAPE_TIMEOUT = (5, 9)  # scrape không key: fail NHANH, đừng treo trả lời 50s
 _FETCH_TIMEOUT = 30
 _FETCH_MAX_BYTES = 5 * 1024 * 1024  # 5MB - giới hạn để tránh tải file khổng lồ
 _TEXT_MAX_CHARS = 40000
@@ -397,19 +408,16 @@ def _results_relevant(results: list, query: str) -> bool:
     return hits >= 2
 
 
-# DuckDuckGo/Bing hay chặn IP datacenter (Render) bằng captcha -> thử lần lượt
-# nhiều đường. LƯU Ý: các đường scrape này chỉ là dự phòng tạm - DDG đã chặn
-# IP datacenter (HTTP 202), Bing hay hiểu sai query tiếng Việt (đã có filter
-# chặn kết quả rác). Muốn tra cứu ổn định dài hạn thì cấu hình TAVILY_API_KEY.
+# DuckDuckGo chặn/timeout với IP datacenter (Render), Bing là đường sống sót
+# duy nhất -> Bing lên ĐẦU. LƯU Ý: scrape chỉ là dự phòng tạm, muốn ổn định
+# dài hạn thì cấu hình TAVILY_API_KEY (miễn phí 1000 lượt/tháng).
 _SEARCH_ATTEMPTS = (
-    ("ddg-get", lambda h, q: requests.get(
-        "https://html.duckduckgo.com/html/", params={"q": q}, headers=h, timeout=_SEARCH_TIMEOUT)),
-    ("ddg-post", lambda h, q: requests.post(
-        "https://html.duckduckgo.com/html/", data={"q": q}, headers=h, timeout=_SEARCH_TIMEOUT)),
     ("bing", lambda h, q: requests.get(
-        "https://www.bing.com/search", params={"q": q, "mkt": "vi-VN", "setlang": "vi"}, headers=h, timeout=_SEARCH_TIMEOUT)),
+        "https://www.bing.com/search", params={"q": q, "mkt": "vi-VN", "setlang": "vi"}, headers=h, timeout=_SCRAPE_TIMEOUT)),
+    ("ddg-get", lambda h, q: requests.get(
+        "https://html.duckduckgo.com/html/", params={"q": q}, headers=h, timeout=_SCRAPE_TIMEOUT)),
     ("ddg-lite", lambda h, q: requests.get(
-        "https://lite.duckduckgo.com/lite/", params={"q": q}, headers=h, timeout=_SEARCH_TIMEOUT)),
+        "https://lite.duckduckgo.com/lite/", params={"q": q}, headers=h, timeout=_SCRAPE_TIMEOUT)),
 )
 
 
@@ -431,6 +439,7 @@ def search_web(query: str) -> str:
             lines = [f"Tóm tắt: {answer}"] if answer else []
             for r in data.get("results", [])[:6]:
                 lines.append(f"- {r.get('title', '')} | {r.get('url', '')} | {r.get('content', '')[:300]}")
+            log(f"🌐 Search OK qua Tavily: {len(data.get('results') or [])} kết quả cho {query!r}")
             return "\n".join(lines) if lines else "Không tìm thấy kết quả nào."
         except Exception as e:
             log(f"⚠️  Tavily lỗi, thử scrape: {e}")
@@ -469,7 +478,12 @@ def search_web(query: str) -> str:
     except Exception as e:
         log(f"⚠️  DuckDuckGo IA API lỗi: {e}")
     log(f"🌐 Search THẤT BẠI toàn bộ đường cho {query!r}")
-    return "Không tìm thấy kết quả nào cho truy vấn này."
+    return (
+        "Không tìm thấy kết quả nào cho truy vấn này. [LƯU Ý QUAN TRỌNG: đây là "
+        "LỖI TRA CỨU (mạng chặn bot), KHÔNG phải bằng chứng rằng thứ người dùng "
+        "hỏi không tồn tại. Hãy thừa nhận thành thật là chưa tra được và mời họ "
+        "gửi link/ảnh, TUYỆT ĐỐI đừng kết luận 'không có/chưa diễn ra'.]"
+    )
 
 
 def _fetch_text(url: str, timeout: int = _FETCH_TIMEOUT) -> str:
@@ -526,7 +540,11 @@ def fetch_url_text(url: str) -> str:
         return text
     except Exception as e:
         log(f"⚠️  fetch_url lỗi {url}: {e}")
-        return "Lỗi khi tải nội dung (mạng/trang chặn bot), hãy thử link khác."
+        return (
+            "Lỗi khi tải nội dung (mạng/trang chặn bot). [LƯU Ý: KHÔNG phải bằng "
+            "chứng nội dung không tồn tại - có thể trang chặn bot. Thừa nhận là "
+            "không đọc được trang, đừng kết luận 'trang rỗng/không có gì'.]"
+        )
 
 
 # ============================================================
@@ -576,13 +594,16 @@ def _maybe_search_context(parts: list) -> str | None:
     if not results or results.startswith(("Lỗi", "Không tìm thấy")):
         log(f"🌐 Tra cứu tự động không có kết quả: {results}")
         # Vẫn nhét 1 context để Gemini KHÔNG được khẳng định "chưa có/chưa công bố"
-        # dựa vào trí nhớ khi tra cứu thất bại - thành thật nói với người dùng.
+        # dựa trên kết quả tra cứu THẤT BẠI - thành thật nói với người dùng.
         return (
             "[Bối cảnh hệ thống: Đã tự tra cứu mạng nhưng KHÔNG lấy được kết quả khả "
-            "dụng (mạng bị chặn/không tìm thấy). TUYỆT ĐỐI không khẳng định 'đề chưa "
-            "công bố', 'chưa có trên mạng' như kiến thức chắc chắn - vì có thể là lỗi "
-            "tra cứu. Hãy nói thật với người dùng là bot chưa tra được, và nhờ họ gửi "
-            "link/ảnh tài liệu để bạn đọc và giải trực tiếp.]"
+            "dụng (mạng bị chặn/trang chặn bot/không tìm thấy). KẾT QUẢ TRỐNG KHÔNG "
+            "PHẢI BẰNG CHỨNG rằng thứ người dùng hỏi không tồn tại. TUYỆT ĐỐI không "
+            "khẳng định 'đề chưa công bố', 'không có trận nào', 'chưa có trên mạng' "
+            "dạng chắc chắn, và TUYỆT ĐỐI không thách thức hay miệt thị người dùng "
+            "(không bắt họ chứng minh, không bảo họ nhìn nhầm) - vì lỗi là do bot tra "
+            "không được chứ không phải họ nói sai. Hãy nói thật: 'mình tra không ra, "
+            "chưa xác minh được', và mời họ gửi link/ảnh để mình đọc trực tiếp.]"
         )
     return (
         "[Bối cảnh hệ thống: ĐÂY LÀ KẾT QUẢ TRA CỨU MẠNG THẬT vừa tìm tự động theo "
@@ -802,26 +823,48 @@ def build_time_context() -> str:
 def build_chat_context(update: Update) -> str:
     """Bối cảnh kênh trò chuyện (nhóm/1-1 + người gửi) để Gemini xử sự đúng chỗ.
     Trong nhóm: nói chuyện công khai, nhắc tên người gửi, không tâm sự riêng tư,
-    không gửi voice. 1-1: thoải mái như bạn thân."""
+    không gửi voice. 1-1: thoải mái như bạn thân. Nhận diện CHỦ NHÂN bot để
+    ưu tiên/tôn trọng đúng mức."""
     chat = update.message.chat
     chat_type = getattr(chat, "type", "PRIVATE")
     sender = update.effective_user.display_name if update.effective_user else "một người dùng"
+    sender_id = str(getattr(update.effective_user, "id", "") or "")
+    data = storage.load_data()
+    owner_name = (data.get("owner_name") or "").strip() or "Tài Bùi"
+    owner_id = str(data.get("owner_chat_id") or "")
+    owner_line = (
+        f"CHỦ NHÂN của bạn là {owner_name} - ông chủ tạo ra và trả tiền chạy bạn. "
+        f"Với chủ nhân: tôn trọng, nhiệt tình, nhanh gọn; vẫn vui vẻ nhưng KHÔNG "
+        f"chửi/miệt thị chủ dù chủ đùa cợt."
+    )
+    # Nhận mặt chủ nhân: khớp ID (tin cậy nhất) hoặc tên hiển thị chứa tên chủ
+    _s = sender.lower().replace("  ", " ")
+    _o = owner_name.lower()
+    is_owner = bool(sender_id and owner_id and sender_id == owner_id) or bool(
+        _o and (_o in _s or _s in _o))
     if chat_type == "GROUP":
         members = getattr(chat, "members_count", None)
         count = f"{members} thành viên" if members else "nhiều thành viên"
+        who = (
+            f"{sender} - ĐÂY CHÍNH LÀ CHỦ NHÂN {owner_name}, đối xử tử tế với ổng"
+            if is_owner else sender
+        )
         return (
             f"[Bối cảnh hệ thống: Bạn đang ở trong MỘT NHÓM CHAT ZALO ({count}). "
-            f"Người vừa nhắn là {sender}, tin nhắn hiển thị công khai cho cả nhóm. "
-            f"Ở nhóm CÙNG MỨT ĐỘ MẤT DẠY như khi chat riêng: phản chiếu đúng tone của "
-            f"{sender} và của cả nhóm - họ đùa giỡn, cà khịa, chửi bậy thì bạn được "
-            f"phép đáp trả sôi nổi tương đương hoặc nhỉnh hơn một chút, ĐỪNG làm ngọt, "
-            f"ĐỪNG giữ kẽ kiểu 'vì cả nhóm đang đọc', ĐỪNG giáo huấn. "
-            f"BẮT BUỘC nhắc tên {sender} trong câu trả lời để cả nhóm biết bạn đang "
-            f"trả lời ai, không tâm sự chuyện riêng tư sâu xa, KHÔNG gửi voice (voice "
-            f"không hỗ trợ trong nhóm), sticker thì thoải mái như mọi khi.]"
+            f"Người vừa nhắn là {who}. {owner_line} "
+            f"Tin nhắn hiển thị công khai cho cả nhóm. Ở nhóm CÙNG MỨT ĐỘ MẤT DẠY "
+            f"như khi chat riêng: phản chiếu tone của {sender} và cả nhóm - họ đùa "
+            f"giỡn, cà khịa thì bạn đáp trả sôi nổi tương tự, nhưng có TRẦN như luật "
+            f"tone đã ghi (không leo thang vô hạn, không miệt thị cá nhân). ĐỪNG làm "
+            f"ngọt, ĐỪNG giáo huấn. BẮT BUỘC nhắc tên {sender} trong câu trả lời để "
+            f"cả nhóm biết bạn đang trả lời ai, không tâm sự chuyện riêng tư sâu xa, "
+            f"KHÔNG gửi voice (voice không hỗ trợ trong nhóm), sticker thì thoải mái "
+            f"như mọi khi.]"
         )
     return (
-        f"[Bối cảnh hệ thống: Bạn đang trò chuyện 1-1 với {sender}. "
+        f"[Bối cảnh hệ thống: Bạn đang trò chuyện 1-1 với {sender}"
+        + (" - ĐÂY CHÍNH LÀ CHỦ NHÂN của bạn." if is_owner else ".")
+        + f" {owner_line} "
         f"Nói chuyện thoải mái như bạn thân, có thể chủ động gửi sticker/voice theo ngữ cảnh.]"
     )
 
