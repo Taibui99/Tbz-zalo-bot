@@ -313,9 +313,75 @@ def _collapse_whitespace(text: str) -> str:
     return re.sub(r"[ \t\r\f\v]+", " ", text).replace("\n ", "\n").strip()
 
 
+def _parse_ddg_html(html: str) -> list:
+    """Parse kết quả DuckDuckGo (markup html/ và lite/)."""
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    for a in soup.select("a.result__a")[:6]:
+        href = a.get("href", "")
+        m = re.search(r"uddg=([^&]+)", href)
+        url = urllib.parse.unquote(m.group(1)) if m else href
+        title = _collapse_whitespace(a.get_text(" ", strip=True))
+        parent = a.find_parent("div", class_="result")
+        snippet = ""
+        if parent:
+            sn = parent.select_one(".result__snippet")
+            snippet = _collapse_whitespace(sn.get_text(" ", strip=True)) if sn else ""
+        results.append(f"- {title} | {url} | {snippet}")
+    if results:
+        return results
+    # Markup lite: table.result / div.result
+    rows = soup.select("table.result") or soup.select("div.result")
+    for row in rows[:6]:
+        link = row.find("a")
+        if not link:
+            continue
+        url = link.get("href", "")
+        title = _collapse_whitespace(link.get_text(" ", strip=True))
+        snippet = ""
+        sn = row.select_one(".result-snippet")
+        snippet = _collapse_whitespace(sn.get_text(" ", strip=True)) if sn else ""
+        results.append(f"- {title} | {url} | {snippet}")
+    return results
+
+
+def _parse_bing_html(html: str) -> list:
+    """Parse kết quả Bing (li.b_algo)."""
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    for li in soup.select("li.b_algo")[:6]:
+        a = li.find("h2")
+        link = a.find("a") if a else li.find("a")
+        if not link:
+            continue
+        title = _collapse_whitespace(link.get_text(" ", strip=True))
+        url = link.get("href", "")
+        snippet = ""
+        cap = li.select_one(".b_caption p") or li.find("p")
+        if cap:
+            snippet = _collapse_whitespace(cap.get_text(" ", strip=True))
+        if title and url:
+            results.append(f"- {title} | {url} | {snippet}")
+    return results
+
+
+# DuckDuckGo/Bing hay chặn IP datacenter (Render) bằng captcha -> thử lần lượt
+# nhiều đường: GET rồi POST với DDG, sang Bing, về lite, cuối cùng IA API.
+_SEARCH_ATTEMPTS = (
+    ("ddg-get", lambda h, q: requests.get(
+        "https://html.duckduckgo.com/html/", params={"q": q}, headers=h, timeout=_SEARCH_TIMEOUT)),
+    ("ddg-post", lambda h, q: requests.post(
+        "https://html.duckduckgo.com/html/", data={"q": q}, headers=h, timeout=_SEARCH_TIMEOUT)),
+    ("bing", lambda h, q: requests.get(
+        "https://www.bing.com/search", params={"q": q, "setlang": "vi"}, headers=h, timeout=_SEARCH_TIMEOUT)),
+    ("ddg-lite", lambda h, q: requests.get(
+        "https://lite.duckduckgo.com/lite/", params={"q": q}, headers=h, timeout=_SEARCH_TIMEOUT)),
+)
+
+
 def search_web(query: str) -> str:
     """Tìm kiếm internet, trả text kết quả cho Gemini. Ưu tiên Tavily nếu có key,
-    nếu không scrape DuckDuckGo (không cần key)."""
+    nếu không scrape DuckDuckGo/Bing (không cần key)."""
     query = (query or "").strip()
     if not query:
         return "Lỗi: không có truy vấn."
@@ -333,75 +399,40 @@ def search_web(query: str) -> str:
                 lines.append(f"- {r.get('title', '')} | {r.get('url', '')} | {r.get('content', '')[:300]}")
             return "\n".join(lines) if lines else "Không tìm thấy kết quả nào."
         except Exception as e:
-            log(f"⚠️  Tavily lỗi, thử DuckDuckGo: {e}")
-    # Scrape DuckDuckGo HTML
-    try:
-        resp = requests.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": _SEARCH_UA},
-            timeout=_SEARCH_TIMEOUT,
-        )
-        soup = BeautifulSoup(resp.text, "html.parser")
-        results = []
-        for a in soup.select("a.result__a")[:6]:
-            href = a.get("href", "")
-            m = re.search(r"uddg=([^&]+)", href)
-            url = urllib.parse.unquote(m.group(1)) if m else href
-            title = _collapse_whitespace(a.get_text(" ", strip=True))
-            parent = a.find_parent("div", class_="result")
-            snippet = ""
-            if parent:
-                sn = parent.select_one(".result__snippet")
-                snippet = _collapse_whitespace(sn.get_text(" ", strip=True)) if sn else ""
-            results.append(f"- {title} | {url} | {snippet}")
-        if results:
-            return "\n".join(results)
-        # Endpoint lite (markup khác) nếu html không ra
-        resp2 = requests.get(
-            "https://lite.duckduckgo.com/lite/",
-            params={"q": query},
-            headers={"User-Agent": _SEARCH_UA},
-            timeout=_SEARCH_TIMEOUT,
-        )
-        soup2 = BeautifulSoup(resp2.text, "html.parser")
-        rows = soup2.select("table.result") or soup2.select("div.result")
-        out = []
-        for row in rows[:6]:
-            link = row.find("a")
-            if not link:
-                continue
-            url = link.get("href", "")
-            title = _collapse_whitespace(link.get_text(" ", strip=True))
-            snippet = ""
-            sn = row.select_one(".result-snippet")
-            snippet = _collapse_whitespace(sn.get_text(" ", strip=True)) if sn else ""
-            out.append(f"- {title} | {url} | {snippet}")
-        if out:
-            return "\n".join(out)
-        # Fallback: DuckDuckGo Instant Answer API (không cần key, hay trả abstract/wiki)
+            log(f"⚠️  Tavily lỗi, thử scrape: {e}")
+    headers = {"User-Agent": _SEARCH_UA}
+    for name, fetch in _SEARCH_ATTEMPTS:
         try:
-            resp3 = requests.get(
-                "https://api.duckduckgo.com/",
-                params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
-                headers={"User-Agent": _SEARCH_UA},
-                timeout=_SEARCH_TIMEOUT,
-            )
-            data3 = resp3.json()
-            lines = []
-            if data3.get("AbstractText"):
-                lines.append(f"- {data3.get('AbstractText', '')[:400]} | {data3.get('AbstractURL') or ''} | (Wikipedia)")
-            for t in (data3.get("RelatedTopics") or [])[:5]:
-                if isinstance(t, dict) and t.get("Text"):
-                    lines.append(f"- {t['Text'][:300]} | {t.get('FirstURL') or ''}")
-            if lines:
-                return "\n".join(lines)
+            resp = fetch(headers, query)
+            results = _parse_bing_html(resp.text) if name == "bing" else _parse_ddg_html(resp.text)
+            if results:
+                log(f"🌐 Search OK qua {name}: {len(results)} kết quả cho {query!r}")
+                return "\n".join(results)
+            log(f"🌐 Search {name} trả rỗng (HTTP {resp.status_code}) cho {query!r}")
         except Exception as e:
-            log(f"⚠️  DuckDuckGo IA API lỗi: {e}")
-        return "Không tìm thấy kết quả nào cho truy vấn này."
+            log(f"⚠️  Search {name} lỗi: {e}")
+    # Fallback cuối: DuckDuckGo Instant Answer API (không cần key, hay trả abstract/wiki)
+    try:
+        resp3 = requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
+            headers=headers,
+            timeout=_SEARCH_TIMEOUT,
+        )
+        data3 = resp3.json()
+        lines = []
+        if data3.get("AbstractText"):
+            lines.append(f"- {data3.get('AbstractText', '')[:400]} | {data3.get('AbstractURL') or ''} | (Wikipedia)")
+        for t in (data3.get("RelatedTopics") or [])[:5]:
+            if isinstance(t, dict) and t.get("Text"):
+                lines.append(f"- {t['Text'][:300]} | {t.get('FirstURL') or ''}")
+        if lines:
+            log(f"🌐 Search OK qua ddg-ia cho {query!r}")
+            return "\n".join(lines)
     except Exception as e:
-        log(f"⚠️  search_web lỗi: {e}")
-        return "Lỗi tìm kiếm (mạng/rate-limit), hãy báo người dùng thử lại sau."
+        log(f"⚠️  DuckDuckGo IA API lỗi: {e}")
+    log(f"🌐 Search THẤT BẠI toàn bộ đường cho {query!r}")
+    return "Không tìm thấy kết quả nào cho truy vấn này."
 
 
 def _fetch_text(url: str, timeout: int = _FETCH_TIMEOUT) -> str:

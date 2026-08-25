@@ -61,13 +61,13 @@ async def _check_and_send(bot: Bot, vn_now_fn, log_fn):
     current_hm = now.strftime("%H:%M")
     morning = data.get("morning_greeting", {})
 
-    # Log chi tiết mỗi lần kiểm tra - để debug xem scheduler có thấy đúng cài đặt
-    # đã lưu không. Nếu thấy owner_chat_id=None hoặc morning trống, nghĩa là dữ
-    # liệu cài đặt đã bị mất (thường do Render tự khởi động lại server).
-    log_fn(
-        f"⏰ [scheduler check] giờ hiện tại={current_hm} | owner_chat_id={owner_chat_id} | "
-        f"chào sáng: bật={morning.get('enabled')}, giờ cài={morning.get('time')}"
-    )
+    # Log nhịp tim mỗi 10 phút (tránh spam đè log quan trọng trong buffer),
+    # cộng log ngay khi thấy thiếu dữ liệu để debug mất cài đặt.
+    if not owner_chat_id or now.minute % 10 == 0:
+        log_fn(
+            f"⏰ [scheduler check] giờ hiện tại={current_hm} | owner_chat_id={owner_chat_id} | "
+            f"chào sáng: bật={morning.get('enabled')}, giờ cài={morning.get('time')}"
+        )
 
     if not owner_chat_id:
         storage.save_data(data)
