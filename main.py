@@ -79,10 +79,18 @@ PUBLIC_URL = PUBLIC_URL.rstrip("/")
 # hành vi cũ. Web Tbz-Bot-Web phải gửi kèm header X-Admin-Token cùng giá trị này.
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
 
-# Key TÙY CHỌN cho API tìm kiếm Tavily (https://tavily.com - có free tier).
-# Nếu set: bot tra cứu web bằng Tavily (ổn định, kết quả sạch). Không set: bot
-# tự scrape DuckDuckGo (miễn phí, không cần key) - đủ dùng nhưng dễ bị chặn hơn.
+# Key TÙY CHỌN cho API tìm kiếm - CÀI MỘT TRONG NHỮNG KEY SAU (ưu tiên từ trên xuống):
+# 1. TAVILY_API_KEY  - https://tavily.com (free 1000 lượt/tháng, dễ nhất)
+# 2. GOOGLE_API_KEY + GOOGLE_CSE_ID - Custom Search JSON API (free 100 lượt/ngày,
+#    tạo key tại console.cloud.google.com + programmablesearchengine.google.com,
+#    bật "Search the entire web")
+# 3. BRAVE_API_KEY   - https://brave.com/search/api (free ~2000 lượt/tháng)
+# Không có key nào: bot scrape Google-qua-jina/Bing/DuckDuckGo (không cần key
+# nhưng kém ổn định vì IP datacenter hay bị chặn).
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "").strip()
+GOOGLE_CSE_ID = os.environ.get("GOOGLE_CSE_ID", "").strip()
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "").strip()
 
 # Lưu ảnh AI vừa tạo trong RAM để phục vụ qua route /img/{id} - chỉ giữ tối đa
 # 50 ảnh gần nhất, ảnh cũ tự bị đẩy ra (không cần dọn dẹp thủ công)
@@ -418,25 +426,115 @@ def _results_relevant(results: list, query: str) -> bool:
     return hits >= 2
 
 
-# DuckDuckGo chặn/timeout với IP datacenter (Render), Bing là đường sống sót
-# duy nhất -> Bing lên ĐẦU. LƯU Ý: scrape chỉ là dự phòng tạm, muốn ổn định
-# dài hạn thì cấu hình TAVILY_API_KEY (miễn phí 1000 lượt/tháng).
+def _google_cse_search(query: str) -> str | None:
+    """Google Custom Search JSON API. Trả None nếu chưa cấu hình key."""
+    if not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
+        return None
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": query, "num": 6, "hl": "vi"},
+            timeout=_SEARCH_TIMEOUT,
+        )
+        data = resp.json()
+        if data.get("error"):
+            log(f"⚠️  Google CSE lỗi: {data['error'].get('message', '')[:150]}")
+            return ""
+        items = data.get("items") or []
+        lines = [
+            f"- {it.get('title', '')} | {it.get('link', '')} | {(it.get('snippet') or '')[:300]}"
+            for it in items[:6]
+        ]
+        log(f"🌐 Search OK qua Google CSE: {len(lines)} kết quả cho {query!r}")
+        return "\n".join(lines) if lines else ""
+    except Exception as e:
+        log(f"⚠️  Google CSE lỗi: {e}")
+        return ""
+
+
+def _brave_search(query: str) -> str | None:
+    """Brave Search API. Trả None nếu chưa cấu hình key."""
+    if not BRAVE_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            params={"q": query, "count": 6, "search_lang": "vi", "country": "vn"},
+            headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY},
+            timeout=_SEARCH_TIMEOUT,
+        )
+        data = resp.json()
+        results = (data.get("web") or {}).get("results") or []
+        lines = [
+            f"- {r.get('title', '')} | {r.get('url', '')} | {(r.get('description') or '')[:300]}"
+            for r in results[:6]
+        ]
+        log(f"🌐 Search OK qua Brave: {len(lines)} kết quả cho {query!r}")
+        return "\n".join(lines) if lines else ""
+    except Exception as e:
+        log(f"⚠️  Brave lỗi: {e}")
+        return ""
+
+
+def _parse_jina_markdown(text: str) -> list:  # noqa: giữ lại phòng khi cần
+    """Parse kết quả markdown do r.jina.ai đọc hộ trang Google Search."""
+    links = re.findall(r"\[([^\]]{4,140})\]\((https?://[^\)\s]+)\)", text)
+    out, seen = [], set()
+    for title, link in links:
+        low = link.lower()
+        if any(d in low for d in ("google.", "gstatic.", "jina.ai", "youtube.com/results")):
+            continue
+        if link in seen:
+            continue
+        seen.add(link)
+        out.append(f"- {_collapse_whitespace(title)} | {link} |")
+        if len(out) >= 6:
+            break
+    return out
+
+
+def _parse_news_rss(xml_text: str) -> list:
+    """Parse RSS (Google News): <item><title>/<link>/<pubDate>."""
+    items = re.findall(r"<item>(.*?)</item>", xml_text or "", re.S)[:6]
+    out = []
+    for it in items:
+        t = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", it, re.S)
+        d = re.search(r"<pubDate>(.*?)</pubDate>", it)
+        l = re.search(r"<link>(.*?)</link>", it, re.S)
+        if t:
+            title = _collapse_whitespace(t.group(1))
+            date = d.group(1).strip()[:16] if d else ""
+            link = l.group(1).strip() if l else ""
+            out.append(f"- {title} | {link} | {date}")
+    return out
+
+
+# Thứ tự scrape khi KHÔNG có API key nào: Google News RSS (tin thời sự/thể thao
+# chính chủ Google, không chặn datacenter) -> Bing -> DuckDuckGo.
 _SEARCH_ATTEMPTS = (
+    ("gnews-rss", lambda h, q: requests.get(
+        "https://news.google.com/rss/search",
+        params={"q": q, "hl": "vi", "gl": "VN", "ceid": "VN:vi"}, headers=h, timeout=_SCRAPE_TIMEOUT),
+     _parse_news_rss),
     ("bing", lambda h, q: requests.get(
-        "https://www.bing.com/search", params={"q": q, "mkt": "vi-VN", "setlang": "vi"}, headers=h, timeout=_SCRAPE_TIMEOUT)),
+        "https://www.bing.com/search", params={"q": q, "mkt": "vi-VN", "setlang": "vi"}, headers=h, timeout=_SCRAPE_TIMEOUT),
+     _parse_bing_html),
     ("ddg-get", lambda h, q: requests.get(
-        "https://html.duckduckgo.com/html/", params={"q": q}, headers=h, timeout=_SCRAPE_TIMEOUT)),
+        "https://html.duckduckgo.com/html/", params={"q": q}, headers=h, timeout=_SCRAPE_TIMEOUT),
+     _parse_ddg_html),
     ("ddg-lite", lambda h, q: requests.get(
-        "https://lite.duckduckgo.com/lite/", params={"q": q}, headers=h, timeout=_SCRAPE_TIMEOUT)),
+        "https://lite.duckduckgo.com/lite/", params={"q": q}, headers=h, timeout=_SCRAPE_TIMEOUT),
+     _parse_ddg_html),
 )
 
 
 def search_web(query: str) -> str:
-    """Tìm kiếm internet, trả text kết quả cho Gemini. Ưu tiên Tavily nếu có key,
-    nếu không scrape DuckDuckGo/Bing (không cần key)."""
+    """Tìm kiếm internet, trả text kết quả cho Gemini.
+    Tầng 1: API có key (Tavily -> Google CSE -> Brave). Tầng 2: scrape không key."""
     query = (query or "").strip()
     if not query:
         return "Lỗi: không có truy vấn."
+    # --- Tầng 1: API ---
     if TAVILY_API_KEY:
         try:
             resp = requests.post(
@@ -452,12 +550,21 @@ def search_web(query: str) -> str:
             log(f"🌐 Search OK qua Tavily: {len(data.get('results') or [])} kết quả cho {query!r}")
             return "\n".join(lines) if lines else "Không tìm thấy kết quả nào."
         except Exception as e:
-            log(f"⚠️  Tavily lỗi, thử scrape: {e}")
+            log(f"⚠️  Tavily lỗi, thử đường khác: {e}")
+    for api_name, api_fn in (("Google CSE", _google_cse_search), ("Brave", _brave_search)):
+        res = api_fn(query)
+        if res is None:
+            continue  # chưa cấu hình key này - bỏ qua im lặng
+        if res and _results_relevant([res], query):
+            return res
+        if res:
+            log(f"🌐 Search {api_name}: kết quả KHÔNG liên quan -> bỏ")
+    # --- Tầng 2: scrape không cần key ---
     headers = {"User-Agent": _SEARCH_UA}
-    for name, fetch in _SEARCH_ATTEMPTS:
+    for name, fetch, parse in _SEARCH_ATTEMPTS:
         try:
             resp = fetch(headers, query)
-            results = _parse_bing_html(resp.text) if name == "bing" else _parse_ddg_html(resp.text)
+            results = parse(resp.text)
             if results and not _results_relevant(results, query):
                 log(f"🌐 Search {name}: {len(results)} kết quả nhưng KHÔNG liên quan -> bỏ")
                 continue
@@ -565,6 +672,22 @@ def fetch_url_text(url: str) -> str:
 # ============================================================
 _FACT_TTL = 1800  # giây - kết quả tra cứu dùng chung được trong 30 phút
 _fact_cache: dict = {}  # frozenset(tokens) -> (timestamp, results_text)
+# Sổ tay dữ kiện chia sẻ MỌI KÊNH CHAT: bot tra được gì (dữ kiện khách quan)
+# thì ghi vào đây, inject gọn vào tất cả các session để trả lời nhất quán -
+# chat nhóm và chat riêng biết cùng một thế giới nhưng KHÔNG chia sẻ hội thoại
+# riêng tư (mỗi chat vẫn có session/memory riêng).
+_shared_notes: deque = deque(maxlen=10)
+
+
+def _note_fact(query: str, results: str):
+    """Ghi 1 dòng dữ kiện từ kết quả search vào sổ tay chung."""
+    if not results or results.startswith(("Lỗi", "Không tìm thấy")):
+        return
+    first = results.splitlines()[0][:180]
+    note = f"{query[:80]} -> {first}"
+    if _shared_notes and _shared_notes[-1] == note:
+        return
+    _shared_notes.append(note)
 
 
 def _norm_q_tokens(q: str) -> frozenset:
@@ -601,6 +724,22 @@ def _fact_cache_put(query: str, results: str):
             oldest = min(_fact_cache, key=lambda k: _fact_cache[k][0])
             _fact_cache.pop(oldest, None)
         _fact_cache[_norm_q_tokens(query)] = (time.time(), results)
+    _note_fact(query, results)
+
+
+def build_shared_notes_context() -> str:
+    """Sổ tay dữ kiện vừa tra cứu (dùng chung mọi kênh) - giúp bot nói chuyện
+    nhất quán giữa chat riêng và nhóm mà không lộ hội thoại riêng tư."""
+    if not _shared_notes:
+        return ""
+    lines = "\n".join(f"- {n}" for n in list(_shared_notes)[-5:])
+    return (
+        "[Bối cảnh hệ thống - GHI CHÚ DỮ KIỆN BOT ĐÃ TRA CỨU GẦN ĐÂY (dùng chung "
+        "mọi kênh chat, CHỈ gồm dữ kiện khách quan, không chứa chuyện riêng tư): "
+        "nếu câu hỏi hiện tại liên quan thì trả lời NHẤT QUÁN với các dữ kiện "
+        "này, đừng mâu thuẫn với những gì bot đã xác minh ở kênh khác:\n"
+        f"{lines}]"
+    )
 
 
 _AUTO_SEARCH_EXAM = re.compile(
