@@ -173,6 +173,16 @@ SYSTEM_INSTRUCTION = (
     "đọc trực tiếp. CẤM tuyên bố chắc chắn 'không tồn tại/không có gì' và CẤM đổ "
     "lỗi hay thách thức người dùng (bắt họ đưa bằng chứng, bảo họ nhìn nhầm) cho "
     "chuyện mà chính bạn chịu trách nhiệm tra cứu."
+    "QUY TẮC VÀNG 3 (SỰ KIỆN NGÀY ĐÓ): khi người dùng THÔNG BÁO hoặc hỏi về một "
+    "sự kiện gắn với hôm nay/ngày mai ('hôm nay là chung kết...', 'mai có trận...'), "
+    "đó luôn là việc PHẢI XÁC MINH bằng search_web TRƯỚC khi trả lời - dù bạn cảm "
+    "thấy mình biết. KHÔNG vâng dạ 'đúng rồi!' chỉ vì người nói thân quen, KHÔNG "
+    "phủ nhận gọn lỏn chỉ vì trí nhớ bạn không thấy - cả hai đều là bịa nếu chưa "
+    "tra. CẨM TUYỆT ĐỐI nói 'tôi đã tra cứu rồi', 'tôi vừa kiểm tra' nếu trong "
+    "ngữ cảnh hiện tại KHÔNG có kết quả tool thật. Dòng '[KẾT QUẢ TRA CỨU GẦN "
+    "ĐÂY...]': đó là kết quả web bot đã tìm trong ít phút trước, có thể từ cuộc "
+    "trò chuyện khác - dữ liệu thật, dùng như kết quả tra cứu bình thường để câu "
+    "chữa lời nhất giữa các kênh chat."
 )
 
 # ============================================================
@@ -548,10 +558,51 @@ def fetch_url_text(url: str) -> str:
 
 
 # ============================================================
-# AUTO SEARCH: tự tra cứu web khi người dùng có ý định tra/tìm/giải đề.
-# Lý do: Gemini không phải lúc nào cũng chịu gọi search_web (nhất là flash-lite),
-# nên nếu thấy dấu hiệu 'tra cứu' là search trước rồi nhét kết quả vào ngữ cảnh.
+# AUTO SEARCH: tự tra cứu web khi người dùng có ý định tra/tìm/giải đề,
+# hoặc hỏi về sự kiện/thể thao đang diễn ra. Lý do: Gemini không phải lúc nào
+# cũng chịu gọi search_web (nhất là flash-lite), nên nếu thấy dấu hiệu 'tra cứu'
+# là search trước rồi nhét kết quả vào ngữ cảnh.
 # ============================================================
+_FACT_TTL = 1800  # giây - kết quả tra cứu dùng chung được trong 30 phút
+_fact_cache: dict = {}  # frozenset(tokens) -> (timestamp, results_text)
+
+
+def _norm_q_tokens(q: str) -> frozenset:
+    toks = re.split(r"[\W_]+", (q or "").lower(), flags=re.UNICODE)
+    return frozenset(t for t in toks if len(t) >= 3)
+
+
+def _fact_cache_get(query: str) -> str | None:
+    """Tìm kết quả tra cứu gần đây khớp query hiện tại - chia sẻ GIỮA CÁC CHAT,
+    để bot không trả lời mâu thuẫn nhau giữa chat riêng và nhóm."""
+    qt = _norm_q_tokens(query)
+    if not qt:
+        return None
+    now_ts = time.time()
+    best_key, best_score = None, 0.0
+    for k in list(_fact_cache.keys()):
+        ts, res = _fact_cache[k]
+        if now_ts - ts > _FACT_TTL:
+            _fact_cache.pop(k, None)
+            continue
+        inter, union = len(qt & k), len(qt | k)
+        score = inter / union if union else 0.0
+        if score > best_score:
+            best_key, best_score = k, score
+    if best_key and best_score >= 0.55:
+        return _fact_cache[best_key][1]
+    return None
+
+
+def _fact_cache_put(query: str, results: str):
+    if results and not results.startswith(("Lỗi", "Không tìm thấy")):
+        # giữ cache gọn: xoá entry cũ nhất nếu quá 20 mục
+        if len(_fact_cache) >= 20:
+            oldest = min(_fact_cache, key=lambda k: _fact_cache[k][0])
+            _fact_cache.pop(oldest, None)
+        _fact_cache[_norm_q_tokens(query)] = (time.time(), results)
+
+
 _AUTO_SEARCH_EXAM = re.compile(
     r"(đề\s*thi|đề\s*kiểm\s*tra|đề\s+cương|đề\s+bài|bài\s*thi|đáp\s*án|tài\s*liệu|"
     r"vnoi|voi|ioi|olp|hsg|thptqg|thpt|chuyên|tuyển\s*sinh|thi\s+\w+\s+202[0-9])",
@@ -562,6 +613,14 @@ _AUTO_SEARCH_WORD = re.compile(
     re.IGNORECASE,
 )
 _AUTO_SEARCH_YEAR = re.compile(r"\b20(2[4-9]|3[0-9])\b")
+# Sự kiện/thể thao/thời sự: 'chung kết aff cup', 'hôm nay có trận nào', 'kết quả bóng đá'...
+_AUTO_SEARCH_EVENT = re.compile(
+    r"(chung\s*kết|bán\s*kết|tứ\s*kết|kết\s*quả|tỷ\s*số|ty\s*so|trận\s*(đấu|giao\s*hữu|của)|"
+    r"lượt\s*(đi|về)|đá\s+(với|gặp|ngày)|đối\s*đầu|lịch\s*thi\s*đấu|"
+    r"aff\s*cup|asean\s*cup|world\s*cup|euro\b|v\.?league|premier\s*league|"
+    r"cúp\s*bóng|giải\s*vô\s*địch|bóng\s*đá|hôm\s*nay.*trận|trận.*hôm\s*nay|mai.*đá)",
+    re.IGNORECASE,
+)
 _AUTO_SEARCH_NOISE = re.compile(
     r"(@\S+|https?://\S+|cx|cũng|ko|không|đc|hả|đi|nào|thử|thế|với|kìa|ấy|ngay|luôn|vừa|rồi|lại|cho|bro|bạn|mình)",
     re.IGNORECASE,
@@ -571,7 +630,12 @@ _AUTO_SEARCH_NOISE = re.compile(
 def should_auto_search(text: str) -> bool:
     if not text:
         return False
-    return bool(_AUTO_SEARCH_EXAM.search(text) or _AUTO_SEARCH_WORD.search(text) or _AUTO_SEARCH_YEAR.search(text))
+    return bool(
+        _AUTO_SEARCH_EXAM.search(text)
+        or _AUTO_SEARCH_WORD.search(text)
+        or _AUTO_SEARCH_EVENT.search(text)
+        or _AUTO_SEARCH_YEAR.search(text)
+    )
 
 
 def build_search_query(text: str) -> str:
@@ -589,8 +653,15 @@ def _maybe_search_context(parts: list) -> str | None:
     if not should_auto_search(user_text):
         return None
     query = build_search_query(user_text)
-    log(f"🌐 Tự động tra cứu web: {query!r}")
-    results = search_web(query)
+    cached = _fact_cache_get(query)
+    if cached:
+        log(f"♻️  Dùng lại kết quả tra cứu gần đây cho {query!r} (chia sẻ liên chat)")
+    else:
+        log(f"🌐 Tự động tra cứu web: {query!r}")
+        results = search_web(query)
+        _fact_cache_put(query, results)
+        cached = results
+    results = cached
     if not results or results.startswith(("Lỗi", "Không tìm thấy")):
         log(f"🌐 Tra cứu tự động không có kết quả: {results}")
         # Vẫn nhét 1 context để Gemini KHÔNG được khẳng định "chưa có/chưa công bố"
@@ -771,7 +842,14 @@ def execute_tool(name: str, args: dict, allow_voice: bool) -> tuple:
         else:
             result_msg = "không gửi được voice vì cuộc trò chuyện này là nhóm"
     elif name == "search_web":
-        result_msg = search_web(args.get("query", ""))
+        q = (args.get("query") or "").strip()
+        cached = _fact_cache_get(q)
+        if cached:
+            log(f"♻️  Tool search_web dùng kết quả gần đây cho {q!r} (chia sẻ liên chat)")
+            result_msg = cached
+        else:
+            result_msg = search_web(q)
+            _fact_cache_put(q, result_msg)
     elif name == "fetch_url":
         result_msg = fetch_url_text(args.get("url", ""))
     else:
