@@ -34,6 +34,11 @@ DEFAULT_DATA = {
     "morning_greeting": {
         "enabled": False,
         "time": "07:00",
+        # Nội dung chào buổi sáng - có thể tùy biến từ dashboard. Giữ nguyên
+        # {weekday} {date} {weather} {location} {time} làm placeholder.
+        "text": "☀️ Chào buổi sáng! Hôm nay là {weekday}, {date}.\n"
+                "Thời tiết ở {location} hiện tại: {weather}.\n"
+                "Chúc bro 1 ngày học tập hiệu quả! 📚",
     },
     "location": {
         "name": "Đồng Xoài, Bình Phước",

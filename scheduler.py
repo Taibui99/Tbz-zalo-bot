@@ -95,11 +95,21 @@ async def _check_and_send(bot: Bot, vn_now_fn, log_fn):
                     log_fn,
                 )
                 weekday_vi = WEEKDAY_VI[now.weekday()]
-                text = (
-                    f"☀️ Chào buổi sáng! Hôm nay là {weekday_vi}, {now.strftime('%d/%m/%Y')}.\n"
-                    f"Thời tiết ở {loc.get('name', 'chỗ bro')} hiện tại: {summary}.\n"
-                    f"Chúc bro 1 ngày học tập hiệu quả! 📚"
+                template = (morning.get("text") or "").strip() or (
+                    "☀️ Chào buổi sáng! Hôm nay là {weekday}, {date}.\n"
+                    "Thời tiết ở {location} hiện tại: {weather}.\n"
+                    "Chúc bro 1 ngày học tập hiệu quả! 📚"
                 )
+                try:
+                    text = template.format(
+                        weekday=weekday_vi,
+                        date=now.strftime("%d/%m/%Y"),
+                        weather=summary,
+                        location=loc.get("name", "chỗ bro"),
+                        time=now.strftime("%H:%M"),
+                    )
+                except Exception:
+                    text = template  # nếu template chứa placeholder lạ thì gửi nguyên
                 try:
                     await bot.send_message(owner_chat_id, text)
                     log_fn(f"☀️ Đã gửi chào buổi sáng cho {owner_chat_id}")
