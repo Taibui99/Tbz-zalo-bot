@@ -1001,9 +1001,10 @@ def execute_tool(name: str, args: dict, allow_voice: bool) -> tuple:
 
 def _all_safety_settings(include_image: bool = False) -> list:
     """Mở khóa toàn bộ bộ lọc nội dung Gemini (kể cả JAILBREAK) - BLOCK_NONE hết,
-    để nói chuyện tự nhiên không kiểm duyệt theo yêu cầu chủ bot. Các category
-    IMAGE_* chỉ hợp lệ với model tạo ảnh (gemini-2.5-flash-image...), model text
-    sẽ báo 400 INVALID_ARGUMENT nếu gửi kèm nên mặc định bỏ qua."""
+    để nói chuyện tự nhiên không kiểm duyệt theo yêu cầu chủ bot. Thực tế các
+    model ảnh cũng KHÔNG chấp nhận category HARM_CATEGORY_IMAGE_* (trả 400
+    INVALID_ARGUMENT), nên tham số include_image hiện để False mọi nơi - giữ
+    chỉ để tương thích."""
     categories = [
         c for c in types.HarmCategory
         if c != types.HarmCategory.HARM_CATEGORY_UNSPECIFIED
@@ -1090,7 +1091,10 @@ def build_chat_context(update: Update) -> str:
 
 def _gen_image_bytes(prompt: str):
     """Gọi model tạo ảnh của Gemini, thử lần lượt từng model trong
-    IMAGE_GEN_MODELS (model free tier trước). Trả (bytes, mime_type) hoặc None."""
+    IMAGE_GEN_MODELS. Trả (bytes, mime_type) hoặc None.
+    LƯU Ý: model ảnh KHÔNG chấp nhận category HARM_CATEGORY_IMAGE_* trong
+    safety_settings (trả 400 INVALID_ARGUMENT), nên dùng bộ category text như
+    model chat bình thường (include_image=False)."""
     client = get_gemini_client()
     for model in IMAGE_GEN_MODELS:
         try:
@@ -1099,7 +1103,7 @@ def _gen_image_bytes(prompt: str):
                 contents=prompt,
                 config={
                     "response_modalities": ["IMAGE"],
-                    "safety_settings": _all_safety_settings(include_image=True),
+                    "safety_settings": _all_safety_settings(include_image=False),
                 },
             )
             for part in response.candidates[0].content.parts:
