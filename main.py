@@ -55,7 +55,9 @@ IMAGE_GEN_MODELS = [
     m.strip()
     for m in os.environ.get(
         "IMAGE_GEN_MODELS",
-        "gemini-2.5-flash-image,gemini-3.1-flash-image-preview,gemini-3-pro-image",
+        # Ưu tiên gemini-3-pro-image (chất lượng cao nhất) trước, flash làm bản
+        # dự phòng nhanh khi hết quota/fail. Có thể sửa qua env IMAGE_GEN_MODELS.
+        "gemini-3-pro-image,gemini-2.5-flash-image,gemini-3.1-flash-image-preview",
     ).split(",")
     if m.strip()
 ]
