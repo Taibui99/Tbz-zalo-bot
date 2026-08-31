@@ -69,6 +69,22 @@ ZALO_API_BASES = [
     "https://bot-api.zaloplatforms.com",
 ]
 
+# OpenRouter - trạm trung gian gom nhiều model ảnh (FLUX/Seedream/GPT Image...).
+# Nạp vài chục xu vào account rồi set key vào env để bot có thêm tầng model ảnh
+# đẹp hơn hẳn khi Gemini hết quota. LƯU Ý: OpenRouter KHÔNG còn model ảnh :free,
+# mỗi ảnh tốn ~0.03-0.05$ nhưng nếu model fail thì KHÔNG tính tiền.
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_IMAGE_MODELS = [
+    m.strip()
+    for m in os.environ.get(
+        "OPENROUTER_IMAGE_MODELS",
+        # FLUX.2 Pro (đẹp, đắt chút) trước, rồi Seedream 4.5 (ByeDance, rẻ, giỏi
+        # chữ tiếng Việt hơn). Có thể sửa thứ tự qua env.
+        "black-forest-labs/flux.2-pro,bytedance-seed/seedream-4.5",
+    ).split(",")
+    if m.strip()
+]
+
 # URL công khai của chính server này - dùng để tạo link ảnh cho send_photo (Zalo
 # yêu cầu 1 URL, không nhận file trực tiếp). Set biến môi trường PUBLIC_URL trong
 # Render = đúng domain Render cấp (vd https://tbz-zalo-bot.onrender.com).
@@ -1118,6 +1134,40 @@ def _gen_image_bytes(prompt: str):
     return None
 
 
+def _fetch_openrouter_image(prompt: str):
+    """Tạo ảnh qua OpenRouter Image API (FLUX/Seedream...). Trả (bytes, mime_type)
+    hoặc None nếu chưa có key / thất bại. Chỉ tính tiền khi ảnh sinh thành công."""
+    if not OPENROUTER_API_KEY:
+        return None
+    for model in OPENROUTER_IMAGE_MODELS:
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/images",
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "aspect_ratio": "1:1",
+                    "output_format": "png",
+                    "quality": "high",
+                },
+                timeout=_FETCH_TIMEOUT,
+            )
+            data = resp.json()
+            if resp.status_code != 200 or not data.get("data"):
+                log(f"🎨 OpenRouter {model} lỗi ({resp.status_code}): {str(data)[:200]}")
+                continue
+            img = data["data"][0]
+            import base64 as _b64
+            b = _b64.b64decode(img["b64_json"])
+            mime = img.get("media_type") or "image/png"
+            log(f"🎨 Đã tạo ảnh bằng OpenRouter {model}")
+            return b, mime
+        except Exception as e:
+            log(f"🎨 OpenRouter {model} lỗi: {e}")
+    return None
+
+
 def _fetch_pollinations_image(prompt: str):
     """Fallback tạo ảnh miễn phí, không cần API key (Pollinations.ai).
     Trả (bytes, mime_type) hoặc None. Lazy generate nên có thể mất 10-30s."""
@@ -1140,10 +1190,15 @@ def _fetch_pollinations_image(prompt: str):
 
 def generate_and_store_image(prompt: str):
     """Tạo ảnh AI rồi lưu vào image_store, trả URL công khai (cần PUBLIC_URL).
-    Thứ tự: Gemini (free tier) -> Pollinations.ai (không cần key, luôn miễn phí)."""
+    Thứ tự: Gemini -> OpenRouter (nếu có key, model đẹp hơn hẳn) -> Pollinations
+    (flux, miễn phí không cần key). Gemini hết quota (429) thì tự rơi xuống."""
     if not PUBLIC_URL:
         return None
     result = _gen_image_bytes(prompt)
+    if not result:
+        result = _fetch_openrouter_image(prompt)
+        if result:
+            log("🎨 Đã tạo ảnh bằng OpenRouter (fallback)")
     if not result:
         result = _fetch_pollinations_image(prompt)
         if result:
