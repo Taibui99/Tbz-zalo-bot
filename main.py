@@ -1188,12 +1188,28 @@ def _fetch_pollinations_image(prompt: str):
         return None
 
 
-def generate_and_store_image(prompt: str):
+def _build_image_prompt(raw: str) -> str:
+    """Chuẩn hoá prompt tạo ảnh: GHÉP lời người dùng (giữ NGUYÊN, không để Gemini
+    tự biên sai ý) với lớp mô tả chất lượng tiếng Anh để model ảnh (Flux/Seedream)
+    hiểu chủ đề chính xác. Tránh tình trạng 'ảnh không liên quan câu lệnh' khi
+    Flux tiếp nhận tiếng Việt kém."""
+    raw = (raw or "").strip()
+    return (
+        "High quality detailed illustration. "
+        f"Subject/scene described by the user: {raw} "
+        "Make the main subject clearly match exactly what is requested, "
+        "well-composed, sharp focus, vivid colors, 4k professional render."
+    ).strip()
+
+
+def generate_and_store_image(raw_prompt: str):
     """Tạo ảnh AI rồi lưu vào image_store, trả URL công khai (cần PUBLIC_URL).
     Thứ tự: Gemini -> OpenRouter (nếu có key, model đẹp hơn hẳn) -> Pollinations
-    (flux, miễn phí không cần key). Gemini hết quota (429) thì tự rơi xuống."""
+    (flux, miễn phí không cần key). Gemini hết quota (429) thì tự rơi xuống.
+    Prompt được chuẩn hoá qua _build_image_prompt để ảnh khớp ý người dùng."""
     if not PUBLIC_URL:
         return None
+    prompt = _build_image_prompt(raw_prompt)
     result = _gen_image_bytes(prompt)
     if not result:
         result = _fetch_openrouter_image(prompt)
