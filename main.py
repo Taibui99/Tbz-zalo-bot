@@ -1754,6 +1754,24 @@ def _mode_model(mode: str) -> str:
     return mdef.get("model") or GEMINI_MODEL
 
 
+async def _cmd_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Các lệnh:\n/anh <mô tả> - vẽ ảnh AI\n"
+        "/reset - xoá ngữ cảnh cuộc trò chuyện\n"
+        "/start - chào\n"
+        "/mode [auto|pro|fast|think] - đổi model/chế độ suy luận"
+    )
+
+
+async def _cmd_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """CommandHandler cho /mode trong chat RIÊNG (không prefix @), vì echo bị
+    filters.COMMAND loại khi text bắt đầu bằng '/'. Lấy arg sau '/mode'."""
+    text = (update.message.text or "").strip()
+    # bỏ '/mode' và mọi prefix, giữ lại phần còn lại làm arg
+    arg = re.sub(r"(?i)^\s*(?:@[^\s:]+[\s:]*|/mode)\s*", "", text).strip()
+    await _cmd_mode(update, arg)
+
+
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     text = update.message.text
@@ -1841,6 +1859,8 @@ def run_bot_in_background():
         app_zalo.add_handler(CommandHandler("start", start))
         app_zalo.add_handler(CommandHandler("reset", reset))
         app_zalo.add_handler(CommandHandler("anh", generate_image))
+        app_zalo.add_handler(CommandHandler("mode", _cmd_mode_command))
+        app_zalo.add_handler(CommandHandler("help", _cmd_help_command))
         app_zalo.add_handler(MessageHandler(filters.PHOTO, handle_photo))
         app_zalo.add_handler(MessageHandler(filters.STICKER, handle_sticker))
         app_zalo.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
