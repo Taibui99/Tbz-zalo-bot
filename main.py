@@ -288,12 +288,9 @@ def get_gemini_client():
 
 chat_sessions = {}
 
-# Chế độ dùng model/thinking lưu theo từng chat (per-chat), đổi qua lệnh /mode.
-# auto: model mặc định (GEMINI_MODEL) + thinking minimal
-# pro:  model Pro hoặc model có sẵn của môi trường, thinking cao hơn (chậm hơn)
-# fast: model flash nhanh, tắt thinking cho phản hồi ngay lập tức
-# think: model mặc định + thinking cao nhất (suy luận sâu)
-CHAT_MODES: dict = {}
+# Chế độ dùng model/thinking - TOÀN CỤC, set ở bất kỳ chat nào đều áp dụng
+# cho mọi chat (bro là owner duy nhất, không cần per-chat). Đổi qua lệnh /mode.
+ACTIVE_CHAT_MODE: str = "auto"
 _MODE_DEFAULTS = {
     "auto": {"model": None, "thinking": "minimal"},
     "pro": {"model": None, "thinking": "high"},
@@ -1047,7 +1044,7 @@ def _all_safety_settings(include_image: bool = False) -> list:
 
 def get_chat_session(chat_id: str):
     if chat_id not in chat_sessions:
-        mode = CHAT_MODES.get(chat_id, "auto")
+        mode = ACTIVE_CHAT_MODE
         mdef = _MODE_DEFAULTS.get(mode, _MODE_DEFAULTS["auto"])
         thinking = mdef.get("thinking", "minimal")
         model = mdef.get("model") or GEMINI_MODEL
@@ -1721,12 +1718,13 @@ async def _dispatch_command(name: str, args: str, update: Update, context):
 
 
 async def _cmd_mode(update: Update, arg: str):
-    """Xử lý /mode [auto|pro|fast|think]: đổi model/thinking cho chat này."""
+    """Xử lý /mode [auto|pro|fast|think]: đổi model/thinking TOÀN CỤC."""
+    global ACTIVE_CHAT_MODE
     chat_id = update.message.chat.id
     want = (arg or "").strip().lower()
 
     if not want or want in {"xem", "hien", "list", "help", "?"}:
-        current = CHAT_MODES.get(chat_id, "auto")
+        current = ACTIVE_CHAT_MODE
         lines = [f"Chế độ hiện tại: {current} (model {_mode_model(current)})"]
         lines.append("\n• /mode auto - mặc định, cân bằng")
         lines.append("• /mode pro - model Pro, suy luận sâu hơn (chậm hơn)")
@@ -1741,9 +1739,9 @@ async def _cmd_mode(update: Update, arg: str):
         )
         return
 
-    CHAT_MODES[chat_id] = want
-    chat_sessions.pop(chat_id, None)  # tạo lại session với model mới khi tin kế tiếp
-    log(f"🧠 Chat {chat_id} đổi mode -> {want}")
+    ACTIVE_CHAT_MODE = want
+    chat_sessions.clear()
+    log(f"🧠 Mode TOÀN CỤC đổi -> {want} (xoá tất cả session)")
     await update.message.reply_text(
         f"Đã đổi sang chế độ {want} (model {_mode_model(want)})."
     )
