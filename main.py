@@ -288,6 +288,19 @@ def get_gemini_client():
 
 chat_sessions = {}
 
+# Chế độ dùng model/thinking lưu theo từng chat (per-chat), đổi qua lệnh /mode.
+# auto: model mặc định (GEMINI_MODEL) + thinking minimal
+# pro:  model Pro hoặc model có sẵn của môi trường, thinking cao hơn (chậm hơn)
+# fast: model flash nhanh, tắt thinking cho phản hồi ngay lập tức
+# think: model mặc định + thinking cao nhất (suy luận sâu)
+CHAT_MODES: dict = {}
+_MODE_DEFAULTS = {
+    "auto": {"model": None, "thinking": "minimal"},
+    "pro": {"model": None, "thinking": "high"},
+    "fast": {"model": "gemini-2.5-flash-latest", "thinking": "disabled"},
+    "think": {"model": None, "thinking": "high"},
+}
+
 # Các mã sticker bị Zalo từ chối (error 425 "The sticker is invalid") trong phiên
 # chạy - pack Zalo bị gỡ khỏi store thì mã chết hẳn. Nhớ lại để không chọn lại
 # mã chết nữa, đồng thời tự thay bằng mood khác còn sống.
@@ -1034,18 +1047,43 @@ def _all_safety_settings(include_image: bool = False) -> list:
 
 def get_chat_session(chat_id: str):
     if chat_id not in chat_sessions:
-        config = {
-            "system_instruction": SYSTEM_INSTRUCTION,
-            "thinking_config": {"thinking_level": "minimal"},
-            # Mở khóa toàn bộ bộ lọc nội dung của Gemini (harassment, hate speech,
-            # nội dung nhạy cảm, nguy hiểm, chính trị, JAILBREAK, cả category ảnh)
-            "safety_settings": _all_safety_settings(),
-        }
-        tools = build_tools()
-        if tools:
-            config["tools"] = tools
-        chat_sessions[chat_id] = get_gemini_client().chats.create(model=GEMINI_MODEL, config=config)
-    return chat_sessions[chat_id]
+        mode = CHAT_MODES.get(chat_id, "auto")
+        mdef = _MODE_DEFAULTS.get(mode, _MODE_DEFAULTS["auto"])
+        thinking = mdef.get("thinking", "minimal")
+        model = mdef.get("model") or GEMINI_MODEL
+        safety = _all_safety_settings()
+        try:
+            config = {
+                "system_instruction": SYSTEM_INSTRUCTION,
+                "thinking_config": {"thinking_level": thinking},
+                "safety_settings": safety,
+            }
+            if thinking == "disabled":
+                config.pop("thinking_config", None)
+            tools = build_tools()
+            if tools:
+                config["tools"] = tools
+            chat_sessions[chat_id] = get_gemini_client().chats.create(model=model, config=config)
+            log(f"🧠 Chat {chat_id} mode={mode} model={model} thinking={thinking}")
+            return chat_sessions[chat_id]
+        except errors.ClientError as e:
+            # Vài model free không hỗ trợ thinking_config -> thử lại không có nó
+            log(f"⚠️  Tạo session {mode}/{model} lỗi ({e}); thử lại cấu hình cơ bản")
+        except Exception as e:
+            log(f"⚠️  Tạo session {mode}/{model} lỗi ({e}); thử lại cấu hình cơ bản")
+        try:
+            config = {
+                "system_instruction": SYSTEM_INSTRUCTION,
+                "safety_settings": safety,
+            }
+            tools = build_tools()
+            if tools:
+                config["tools"] = tools
+            chat_sessions[chat_id] = get_gemini_client().chats.create(model=model, config=config)
+            log(f"🧠 Chat {chat_id} mode={mode} model={model} (fallback không thinking)")
+        except Exception as e:
+            log(f"⚠️  Tạo session chat {chat_id} thất bại hoàn toàn: {e}")
+    return chat_sessions.get(chat_id)
 
 
 def build_time_context() -> str:
@@ -1360,6 +1398,13 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
     voice_url_to_send = None
     try:
         session = get_chat_session(chat_id)
+        if session is None:
+            stats["error_count"] += 1
+            log(f"⚠️  Không tạo được session Gemini cho {chat_id}")
+            return (
+                "Mình đang gặp sự cố khởi tạo mô hình, bro thử lại sau giây lát nhé.",
+                None, None, None,
+            )
         # Gắn kèm ngày giờ thật vào MỖI lần gọi (không chỉ lúc tạo session), vì
         # session có thể được dùng lại nhiều giờ/nhiều ngày sau lúc tạo.
         parts_with_time = [build_time_context()] + list(parts)
@@ -1547,9 +1592,15 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def generate_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lệnh /anh <mô tả> - tạo ảnh bằng Gemini rồi gửi qua Zalo."""
-    chat_id = update.message.chat.id
+    """Lệnh /anh <mô tả> - tạo ảnh bằng Gemini rồi gửi qua Zalo (private)."""
     prompt = update.message.text.replace("/anh", "", 1).strip()
+    await _do_generate_image(update, context, prompt)
+
+
+async def _do_generate_image(update: Update, context, prompt: str):
+    """Logic tạo ảnh dùng chung - prompt đã được strip prefix tên bot/người."""
+    chat_id = update.message.chat.id
+    prompt = (prompt or "").strip()
 
     if not prompt:
         await update.message.reply_text("Dùng kiểu: /anh một chú mèo đội nón lá đang ngồi học bài")
@@ -1615,6 +1666,94 @@ async def send_media_replies(update: Update, chat_id: str, sticker_id, photo_url
             log(f"⚠️  Không gửi được voice cho {chat_id} - {voice_url}")
 
 
+# - Lệnh slash trong group Zalo bị Zalo chèn prefix tên bot vào đầu tin nhắn khi
+#   người dùng tag bot (vd '@Bot Tbz AI /anh'), khiến filters.COMMAND (chỉ khớp
+#   text bắt đầu bằng '/') không nhận được. Vì vậy echo tự strip prefix rồi route
+#   mọi lệnh / sang handler tương ứng, chạy đúng cả private lẫn group.
+_PREFIX_RE = re.compile(r"^\s*(?:@[^\s:]+[\s:]*|[^/:]*[:\s]+|\[[^\]]*\]\s*|/)")
+
+def _extract_command(text: str):
+    """Tách khỏi text phần prefix (tên bot/@/tên người/trống) để lấy phần bắt đầu
+    bằng '/'. Trả (command_name, args) nếu có lệnh, ngược lại (None, None).
+    Vd '@Bot Tbz AI /anh con mèo' -> ('anh', 'con mèo').
+    Chỉ bắt lệnh khi '/' đứng ĐẦU text hoặc ngay sau prefix kiểu '@Tên' / 'Tên:'
+    (đúng dạng Zalo tự chèn trong group), tránh bắt nhầm '/' giữa câu thường."""
+    s = (text or "").strip()
+    # Cho phép 3 dạng trước lệnh /: (a) đầu chuỗi, (b) title @ tên bot nhiều từ,
+    # (c) "Tên người: ". Sau đó bắt /lệnh + phần còn lại.
+    m = re.match(
+        r"^(?:(?:@[^/]*[\s:]*)|(?:[^/@][^:]*:[\s]*)|(?:(?=/)))"
+        r"(?:/([a-zA-Z0-9_]+))(?:\s+(.*))?$",
+        s,
+    )
+    if not m:
+        return None, None
+    name = m.group(1).lower()
+    args = (m.group(2) or "").strip()
+    return name, args
+
+
+async def _dispatch_command(name: str, args: str, update: Update, context):
+    """Route 1 lệnh slash đã tách được sang handler phù hợp. Trả True nếu xử lý."""
+    if name == "anh":
+        # Gọi trực tiếp logic tạo ảnh với prompt đã strip prefix
+        await _do_generate_image(update, context, args)
+        return True
+    if name == "reset":
+        chat_sessions.pop(update.message.chat.id, None)
+        await update.message.reply_text("Đã xoá ngữ cảnh cũ, bắt đầu cuộc trò chuyện mới nhé 🔄")
+        return True
+    if name == "start":
+        await start(update, context)
+        return True
+    if name == "help":
+        await update.message.reply_text(
+            "Các lệnh:\n/anh <mô tả> - vẽ ảnh AI\n"
+            "/reset - xoá ngữ cảnh cuộc trò chuyện\n"
+            "/start - chào\n"
+            "/mode [auto|pro|fast|think] - đổi model/chế độ suy luận"
+        )
+        return True
+    if name == "mode":
+        await _cmd_mode(update, args)
+        return True
+    return False
+
+
+async def _cmd_mode(update: Update, arg: str):
+    """Xử lý /mode [auto|pro|fast|think]: đổi model/thinking cho chat này."""
+    chat_id = update.message.chat.id
+    want = (arg or "").strip().lower()
+
+    if not want or want in {"xem", "hien", "list", "help", "?"}:
+        current = CHAT_MODES.get(chat_id, "auto")
+        lines = [f"Chế độ hiện tại: {current} (model {_mode_model(current)})"]
+        lines.append("\n• /mode auto - mặc định, cân bằng")
+        lines.append("• /mode pro - model Pro, suy luận sâu hơn (chậm hơn)")
+        lines.append("• /mode fast - phản hồi nhanh, tắt suy luận")
+        lines.append("• /mode think - suy luận sâu nhất")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    if want not in _MODE_DEFAULTS:
+        await update.message.reply_text(
+            f"Chế độ '{arg}' không hợp lệ. Thử: /mode auto | pro | fast | think"
+        )
+        return
+
+    CHAT_MODES[chat_id] = want
+    chat_sessions.pop(chat_id, None)  # tạo lại session với model mới khi tin kế tiếp
+    log(f"🧠 Chat {chat_id} đổi mode -> {want}")
+    await update.message.reply_text(
+        f"Đã đổi sang chế độ {want} (model {_mode_model(want)})."
+    )
+
+
+def _mode_model(mode: str) -> str:
+    mdef = _MODE_DEFAULTS.get(mode, _MODE_DEFAULTS["auto"])
+    return mdef.get("model") or GEMINI_MODEL
+
+
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     text = update.message.text
@@ -1627,6 +1766,11 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats["text_count"] += 1
     stats["last_message_at"] = time.time()
     log(f"📩 Nhận tin nhắn từ {display_name} ({chat_id}): {text!r}")
+
+    # Nhận diện lệnh / kể cả khi có prefix tên bot/người (thường gặp trong group)
+    cmd_name, cmd_args = _extract_command(text)
+    if cmd_name and await _dispatch_command(cmd_name, cmd_args, update, context):
+        return
 
     allow_voice = getattr(update.message.chat, "type", "PRIVATE") != "GROUP"
     reply_text, sticker_id, photo_url, voice_url = await call_gemini_with_typing(
