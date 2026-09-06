@@ -30,6 +30,21 @@ def _reset_if_new_day(data: dict, today_str: str):
         data["_sent_today"] = []
 
 
+def _recipients(data: dict) -> list:
+    """Các chat nhận thông báo tự động: chủ bot (luôn có) cộng thêm danh sách
+    chat_ids trong cài đặt schedule_targets khi bật công tắc (gồm được cả nhóm
+    GROUP lẫn chat riêng). Không trùng lặp."""
+    owner = data.get("owner_chat_id")
+    out = [str(owner)] if owner else []
+    st = data.get("schedule_targets") or {}
+    if st.get("enabled"):
+        for cid in (st.get("chat_ids") or []):
+            cid = str(cid or "").strip()
+            if cid and cid not in out:
+                out.append(cid)
+    return out
+
+
 def _get_morning_summary(data: dict, today_str: str, lat, lon, log_fn) -> str:
     """Lấy thời tiết tối đa một lần/ngày cho lời chào buổi sáng.
 
@@ -75,7 +90,7 @@ async def _check_and_send(bot: Bot, vn_now_fn, log_fn):
 
     changed = False
 
-    # 1) Chào buổi sáng + thời tiết
+    # 1) Chào buổi sáng + thời tiết (gửi cho chủ bot + các chat được chọn trong sổ)
     if morning.get("enabled") and morning.get("time") == current_hm:
         async with _morning_lock:
             # Reload sau khi lấy lock để một task khác trong cùng process không
@@ -83,8 +98,10 @@ async def _check_and_send(bot: Bot, vn_now_fn, log_fn):
             data = storage.load_data()
             _reset_if_new_day(data, today_str)
 
-            key = f"morning_{today_str}"
-            if key not in data["_sent_today"]:
+            recipients = _recipients(data)
+            if not recipients:
+                storage.save_data(data)
+            else:
                 loc = data.get("location", {})
                 summary = await asyncio.to_thread(
                     _get_morning_summary,
@@ -110,41 +127,48 @@ async def _check_and_send(bot: Bot, vn_now_fn, log_fn):
                     )
                 except Exception:
                     text = template  # nếu template chứa placeholder lạ thì gửi nguyên
-                try:
-                    await bot.send_message(owner_chat_id, text)
-                    log_fn(f"☀️ Đã gửi chào buổi sáng cho {owner_chat_id}")
-                    data["_sent_today"].append(key)
-                    storage.save_data(data)
-                except Exception as e:
-                    # Không gọi lại weather ở phút kế tiếp: summary đã được lưu
-                    # theo ngày trong _morning_weather.
-                    log_fn(f"⚠️ Lỗi gửi chào buổi sáng: {e}")
+                for chat_id in recipients:
+                    key = f"morning_{today_str}_{chat_id}"
+                    if key in data["_sent_today"]:
+                        continue
+                    try:
+                        await bot.send_message(chat_id, text)
+                        log_fn(f"☀️ Đã gửi chào buổi sáng cho {chat_id}")
+                        data["_sent_today"].append(key)
+                        storage.save_data(data)
+                    except Exception as e:
+                        # Không gọi lại weather ở phút kế tiếp: summary đã được lưu
+                        # theo ngày trong _morning_weather.
+                        log_fn(f"⚠️ Lỗi gửi chào buổi sáng cho {chat_id}: {e}")
 
-    # 2) Báo tiết học tiếp theo khi 1 tiết vừa kết thúc
+    # 2) Báo tiết học tiếp theo khi 1 tiết vừa kết thúc (cho mỗi chat người nhận)
     data = storage.load_data()
     _reset_if_new_day(data, today_str)
+    recipients = _recipients(data)
     weekday_key = WEEKDAY_KEYS[now.weekday()]
     periods = data.get("schedule", {}).get(weekday_key, [])
     for i, period in enumerate(periods):
         if period.get("end") == current_hm:
-            key = f"period_{today_str}_{weekday_key}_{i}"
-            if key not in data["_sent_today"]:
-                next_period = periods[i + 1] if i + 1 < len(periods) else None
-                if next_period:
-                    text = (
-                        f"🔔 Hết tiết {period.get('subject', '')}!\n"
-                        f"Tiết tiếp theo ({next_period.get('start')}-{next_period.get('end')}): "
-                        f"**{next_period.get('subject')}**"
-                    )
-                else:
-                    text = f"🔔 Hết tiết {period.get('subject', '')}! Đó là tiết cuối cùng hôm nay rồi 🎉"
+            next_period = periods[i + 1] if i + 1 < len(periods) else None
+            if next_period:
+                text = (
+                    f"🔔 Hết tiết {period.get('subject', '')}!\n"
+                    f"Tiết tiếp theo ({next_period.get('start')}-{next_period.get('end')}): "
+                    f"**{next_period.get('subject')}**"
+                )
+            else:
+                text = f"🔔 Hết tiết {period.get('subject', '')}! Đó là tiết cuối cùng hôm nay rồi 🎉"
+            for chat_id in recipients:
+                key = f"period_{today_str}_{weekday_key}_{i}_{chat_id}"
+                if key in data["_sent_today"]:
+                    continue
                 try:
-                    await bot.send_message(owner_chat_id, text)
-                    log_fn(f"🔔 Đã báo hết tiết cho {owner_chat_id}")
+                    await bot.send_message(chat_id, text)
+                    log_fn(f"🔔 Đã báo hết tiết cho {chat_id}")
                     data["_sent_today"].append(key)
                     storage.save_data(data)
                 except Exception as e:
-                    log_fn(f"⚠️  Lỗi gửi báo hết tiết: {e}")
+                    log_fn(f"⚠️  Lỗi gửi báo hết tiết cho {chat_id}: {e}")
 
 
 async def run_scheduler(bot_token: str, vn_now_fn, log_fn):

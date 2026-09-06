@@ -47,6 +47,13 @@ DEFAULT_DATA = {
     },
     # schedule: { "Mon": [{"start": "07:00", "end": "07:45", "subject": "Toán"}, ...], ... }
     "schedule": {"Mon": [], "Tue": [], "Wed": [], "Thu": [], "Fri": [], "Sat": [], "Sun": []},
+    # Người nhận thông báo TỰ ĐỘNG (chào sáng + báo tiết) ngoài chủ bot. Owner luôn
+    # nhận; bật enabled thì gửi thêm cho danh sách chat_ids được chọn trên dashboard.
+    # chat_ids = {chat_id trong sổ /api/chats, gồm được cả nhóm GROUP lẫn chat riêng}.
+    "schedule_targets": {
+        "enabled": False,
+        "chat_ids": [],
+    },
     # sticker_library: { "vui": "451a23c11f84f6daaf95", "buon": "...", ... } - mood key
     # bằng tiếng Việt không dấu, để Gemini chọn qua function calling.
     # Chỉ giữ mã CÒN GỬI ĐƯỢC (đã probe thật qua Zalo API ngày 22/08/2026).

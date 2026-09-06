@@ -1955,6 +1955,7 @@ def api_get_settings():
         "morning_greeting": data.get("morning_greeting"),
         "location": data.get("location"),
         "schedule": data.get("schedule"),
+        "schedule_targets": data.get("schedule_targets"),
         "sticker_library": storage.normalize_sticker_library(data.get("sticker_library", {})),
     }
 
@@ -1973,6 +1974,8 @@ async def api_put_settings(request: Request, body: dict):
         data["location"] = body["location"]
     if "schedule" in body:
         data["schedule"] = body["schedule"]
+    if "schedule_targets" in body:
+        data["schedule_targets"] = body["schedule_targets"]
     if "sticker_library" in body:
         data["sticker_library"] = storage.normalize_sticker_library(body["sticker_library"])
         # xoá session cache để phiên chat mới nhất định biết các sticker mới cài
