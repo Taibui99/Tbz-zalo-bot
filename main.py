@@ -1733,18 +1733,20 @@ async def _cmd_mode(update: Update, arg: str):
         await update.message.reply_text("\n".join(lines))
         return
 
-    if want not in _MODE_DEFAULTS:
-        await update.message.reply_text(
-            f"Chế độ '{arg}' không hợp lệ. Thử: /mode auto | pro | fast | think"
-        )
-        return
+    ok, msg = _apply_mode(want)
+    await update.message.reply_text(msg)
 
+
+def _apply_mode(want: str):
+    """Dùng chung cho /mode và web API: đổi mode TOÀN CỤC, trả về (ok, message)."""
+    global ACTIVE_CHAT_MODE
+    want = (want or "").strip().lower()
+    if want not in _MODE_DEFAULTS:
+        return False, f"Chế độ '{want}' không hợp lệ. Thử: auto | pro | fast | think"
     ACTIVE_CHAT_MODE = want
     chat_sessions.clear()
     log(f"🧠 Mode TOÀN CỤC đổi -> {want} (xoá tất cả session)")
-    await update.message.reply_text(
-        f"Đã đổi sang chế độ {want} (model {_mode_model(want)})."
-    )
+    return True, f"Đã đổi sang chế độ {want} (model {_mode_model(want)})."
 
 
 def _mode_model(mode: str) -> str:
@@ -2044,7 +2046,26 @@ def api_config(request: Request):
         "sticker_count": len(data.get("sticker_library", {})),
         "sticker_moods": list(data.get("sticker_library", {}).keys()),
         "admin_enabled": bool(ADMIN_TOKEN),
+        "mode": ACTIVE_CHAT_MODE,
+        "mode_options": [{"id": m, "label": d.get("label", m), "desc": d.get("desc", "")} for m, d in _MODE_DEFAULTS.items()],
     }
+
+
+@app.api_route("/api/mode", methods=["GET", "POST"])
+def api_mode(request: Request):
+    """Web API đổi mode (giống /mode chat): POST /api/mode {mode: auto|pro|fast|think}.
+    GET /api/mode trả mode hiện tại. Guard bằng ADMIN_TOKEN."""
+    guard = _admin_guard(request)
+    if guard:
+        return guard
+    if request.method == "GET":
+        return {"mode": ACTIVE_CHAT_MODE, "active": True}
+    body = request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    want = str((body or {}).get("mode") or "").strip().lower()
+    ok, msg = _apply_mode(want)
+    if not ok:
+        return JSONResponse(content={"success": False, "error": msg}, status_code=400)
+    return {"success": True, "mode": ACTIVE_CHAT_MODE, "message": msg}
 
 
 @app.get("/api/chats")
