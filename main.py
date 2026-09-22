@@ -1386,6 +1386,12 @@ def _extract_response_text(response) -> str:
     return "\n".join(texts).strip()
 
 
+def _is_unavailable_error(e: Exception) -> bool:
+    """Kiểm tra xem lỗi có phải do Gemini đang quá tải (503 UNAVAILABLE) hay không."""
+    msg = str(e)
+    return "503" in msg or "UNAVAILABLE" in msg or "overloaded" in msg.lower() or "high demand" in msg.lower()
+
+
 def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
     """Trả về (text_trả_lời, sticker_id, photo_url, voice_url). Các giá trị media
     có thể là None nếu Gemini không gọi tool tương ứng. Phần async của handler
@@ -1393,7 +1399,9 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
     sticker_id_to_send = None
     photo_url_to_send = None
     voice_url_to_send = None
-    try:
+    MAX_RETRIES = 3
+    for attempt in range(MAX_RETRIES):
+      try:
         session = get_chat_session(chat_id)
         if session is None:
             stats["error_count"] += 1
@@ -1472,13 +1480,27 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
         if not text:
             text = "Mình chưa nghĩ ra câu trả lời, bro hỏi lại kiểu khác thử nhé."
         return text, sticker_id_to_send, photo_url_to_send, voice_url_to_send
-    except errors.ClientError as e:
+      except errors.ClientError as e:
         stats["error_count"] += 1
         if e.code == 429:
             log(f"⚠️  Gemini rate limit (429): {e}")
             return (
                 "Bot đang bị giới hạn tốc độ của Gemini free tier. "
                 "Bro đợi khoảng 1 phút rồi nhắn lại nhé 🙏",
+                None,
+                None,
+                None,
+            )
+        if e.code == 503:
+            wait = 2 ** attempt + random.uniform(0, 1)
+            if attempt < MAX_RETRIES - 1:
+                log(f"⚠️  Gemini quá tải (503), thử lại lần {attempt + 2}/{MAX_RETRIES} sau {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+            log(f"⚠️  Gemini quá tải (503) sau {MAX_RETRIES} lần thử: {e}")
+            return (
+                "Gemini đang bị quá tải do nhiều người dùng cùng lúc. "
+                "Bro thử lại sau 1-2 phút nhé 🙏",
                 None,
                 None,
                 None,
@@ -1494,10 +1516,26 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
             )
         log(f"⚠️  Lỗi Gemini (ClientError): {e}")
         return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None, None, None
-    except Exception as e:
+      except Exception as e:
         stats["error_count"] += 1
+        if _is_unavailable_error(e):
+            wait = 2 ** attempt + random.uniform(0, 1)
+            if attempt < MAX_RETRIES - 1:
+                log(f"⚠️  Gemini quá tải (503 UNAVAILABLE), thử lại lần {attempt + 2}/{MAX_RETRIES} sau {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+            log(f"⚠️  Gemini quá tải (503 UNAVAILABLE) sau {MAX_RETRIES} lần thử: {e}")
+            return (
+                "Gemini đang bị quá tải do nhiều người dùng cùng lúc. "
+                "Bro thử lại sau 1-2 phút nhé 🙏",
+                None,
+                None,
+                None,
+            )
         log(f"⚠️  Lỗi gọi Gemini: {e}")
         return "Xin lỗi, mình đang gặp sự cố khi trả lời. Thử lại sau ít phút nhé.", None, None, None
+    # Nếu hết retry mà không return (không nên xảy ra)
+    return "Mình đang gặp sự cố tạm thời. Thử lại sau ít phút nhé 🙏", None, None, None
 
 
 async def keep_typing(bot, chat_id: str, interval: float = 4.0):
