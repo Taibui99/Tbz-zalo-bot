@@ -8,3 +8,4 @@ gTTS
 imageio-ffmpeg
 beautifulsoup4
 pypdf
+Pillow

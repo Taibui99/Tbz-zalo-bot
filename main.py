@@ -27,6 +27,7 @@ from pypdf import PdfReader
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from google import genai
 from google.genai import errors, types
+from PIL import Image
 
 import scheduler
 import storage
@@ -115,6 +116,45 @@ BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "").strip()
 image_store: "OrderedDict[str, tuple]" = OrderedDict()
 image_store_lock = threading.Lock()
 MAX_STORED_IMAGES = 50
+
+# Kích thước tối đa ảnh gửi Gemini (bytes) — giữ dưới 10MB cho an toàn
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# Kích thước pixel tối đa một cạnh
+_MAX_IMAGE_DIM = 4096
+
+
+def prepare_image_for_gemini(image_bytes: bytes, content_type: str) -> tuple[bytes, str]:
+    """Validate + preprocess ảnh trước khi gửi Gemini. Trả (bytes, mime_type).
+    - Nén lại nếu > 10MB hoặc dimensions quá lớn.
+    - Chuyển format không hỗ trợ (BMP, TIFF...) sang JPEG.
+    - Trả nguyên bản nếu ảnh đã OK."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+    except Exception:
+        # Ảnh corrupted → trả nguyên bản, để Gemini tự report lỗi
+        return image_bytes, content_type
+
+    # Chuyển RGBA/P mode sang RGB (JPEG không hỗ trợ alpha)
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGB")
+
+    needs_resize = img.width > _MAX_IMAGE_DIM or img.height > _MAX_IMAGE_DIM
+    too_large = len(image_bytes) > _MAX_IMAGE_BYTES
+
+    if needs_resize:
+        ratio = min(_MAX_IMAGE_DIM / img.width, _MAX_IMAGE_DIM / img.height)
+        new_w, new_h = int(img.width * ratio), int(img.height * ratio)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        log(f"🖼️  Resize ảnh từ {img.width}x{img.height} -> {new_w}x{new_h}")
+
+    if needs_resize or too_large or content_type not in ("image/jpeg", "image/png", "image/webp"):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85, optimize=True)
+        out = buf.getvalue()
+        log(f"🖼️  Nén ảnh: {len(image_bytes)//1024}KB -> {len(out)//1024}KB")
+        return out, "image/jpeg"
+
+    return image_bytes, content_type
 
 
 def store_image(data: bytes, mime_type: str) -> str:
@@ -1491,6 +1531,15 @@ def call_gemini(chat_id: str, parts: list, allow_voice: bool = True) -> tuple:
                 None,
                 None,
             )
+        if e.code == 400:
+            log(f"⚠️  Gemini từ chối input (400): {str(e)[:300]}")
+            return (
+                "Gemini không xử lý được nội dung bro gửi (ảnh có thể quá lớn "
+                "hoặc format chưa hỗ trợ). Thử gửi ảnh khác nhé 🙏",
+                None,
+                None,
+                None,
+            )
         if e.code == 503:
             wait = 2 ** attempt + random.uniform(0, 1)
             if attempt < MAX_RETRIES - 1:
@@ -1866,6 +1915,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Mình không tải được ảnh bro gửi, thử gửi lại nhé.")
         return
 
+    image_bytes, content_type = prepare_image_for_gemini(image_bytes, content_type)
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=content_type)
     prompt = caption if caption else "Mô tả và phân tích nội dung trong ảnh này giúp mình."
 
