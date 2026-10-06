@@ -2213,8 +2213,18 @@ async def api_test_send(request: Request):
         text = str(body.get("text") or "").strip()
         if not text:
             return JSONResponse(content={"success": False, "error": "Thiếu text"}, status_code=400)
+        # Hỗ trợ test tag @all: mention="group" -> cú pháp OA [@group_id],
+        # mention="at_all" -> chữ @all thường. Giúp chủ bot kiểm tra Bot API
+        # có render mention thật trên nhóm không.
+        mention = str(body.get("mention") or "").strip()
+        if mention == "group":
+            text = f"[@{chat_id}] {text}"
+        elif mention == "at_all":
+            text = f"@all {text}"
+        if mention:
+            log(f"📣 Test mention '{mention}' -> '{(text[:80] + '...') if len(text) > 80 else text}'")
         ok, err_desc = await asyncio.to_thread(_send_text_sync, chat_id, text)
-        result.update(ok=ok, kind="text")
+        result.update(ok=ok, kind="text", sent_text=text)
     elif msg_type == "sticker":
         sticker_id = str(body.get("sticker_id") or "").strip()
         if not sticker_id:
